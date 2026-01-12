@@ -111,6 +111,8 @@ class CESWS:
         }
         if self.deployment_id:
             config_message["config"]["deployment"] = self.deployment_id
+        if self.genesys_ws.ces_input_variables:
+            config_message["config"]["variables"] = self.genesys_ws.ces_input_variables
         try:
             await self.websocket.send(json.dumps(config_message))
         except Exception as e:
