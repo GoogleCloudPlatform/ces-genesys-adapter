@@ -92,20 +92,20 @@ The Cloud Run service needs a Google Cloud service account to run as, which gran
 ### Step 1b: Configure Deployment Values
 
 Open `script/values.sh` in a text editor and fill in the required values. Key variables include:
-    *   `PROJECT_ID`: Your Google Cloud Project ID.
-    *   `SERVICE_NAME`: The name you want to give your Cloud Run service (e.g., `genesys-adapter`).
-    *   `SERVICE_ACCOUNT`: The service account the Cloud Run service will use.
-    *   `LOCATION`: The Google Cloud region where you want to deploy (e.g., `us-central1`).
-    *   `GENESYS_API_KEY_SECRET_PATH`: The full resource path to the Secret Manager secret containing the API key that Genesys will use to connect. **Ensure this secret exists and has a value configured.**
-    *   `GENESYS_CLIENT_SECRET_PATH`: The full resource path to the Secret Manager secret containing the client secret for request signature verification.
-    *   `LOG_UNREDACTED_DATA`: Set to `true` to log unredacted data from Genesys and CES. Otherwise, sensitive information will be redacted (e.g., `<REDACTED>`). Defaults to `false`.
-        **Caution**: This option should typically only be used for local development and debugging purposes. Avoid enabling it in production environments to prevent exposure of sensitive data.
+*   `PROJECT_ID`: Your Google Cloud Project ID.
+*   `SERVICE_NAME`: The name you want to give your Cloud Run service (e.g., `genesys-adapter`).
+*   `SERVICE_ACCOUNT`: The service account the Cloud Run service will use.
+*   `LOCATION`: The Google Cloud region where you want to deploy (e.g., `us-central1`).
+*   `GENESYS_API_KEY_SECRET_PATH`: The full resource path to the Secret Manager secret containing the API key that Genesys will use to connect. **Ensure this secret exists and has a value configured.**
+*   `GENESYS_CLIENT_SECRET_PATH`: The full resource path to the Secret Manager secret containing the client secret for request signature verification.
+*   `LOG_UNREDACTED_DATA`: Set to `true` to log unredacted data from Genesys and CES. Otherwise, sensitive information will be redacted (e.g., `<REDACTED>`). Defaults to `false`.
+    **Caution**: This option should typically only be used for local development and debugging purposes. Avoid enabling it in production environments to prevent exposure of sensitive data.
 
 **Note on Agent and Deployment IDs**: You must pass either an agent ID or a deployment ID within the `inputVariables` of the Genesys "open" message.
-> *   `_agent_id`: The full agent ID.
-> *   `_deployment_id`: The full deployment ID (e.g., `projects/.../deployments/...`). If you provide a deployment ID, the adapter will automatically extract the agent ID from it and include the deployment ID in the request to the conversational agent.
->
-> You can set these up in Architect (on the Genesys console) when setting up the integration in your flow. Any other variables in `inputVariables` (not starting with an underscore) will be forwarded to CES.
+*   `_agent_id`: The full agent ID.
+*   `_deployment_id`: The full deployment ID (e.g., `projects/.../deployments/...`). If you provide a deployment ID, the adapter will automatically extract the agent ID from it and include the deployment ID in the request to the conversational agent.
+
+You can set these up in Architect (on the Genesys console) when setting up the integration in your flow. Any other variables in `inputVariables` (not starting with an underscore) will be forwarded to CES.
 
 ### Passing Data from CES to Genesys
 
