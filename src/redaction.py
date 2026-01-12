@@ -18,7 +18,14 @@ import json
 
 from .config import LOG_UNREDACTED_DATA
 
-REDACT_KEYS = ["inputVariables", "participant", "variables"]
+REDACT_KEYS = ["inputVariables", "participant", "variables", "outputVariables"]
+
+
+def redact_value(value: any) -> any:
+    """Returns '<REDACTED>' if LOG_UNREDACTED_DATA is not 'true'."""
+    if LOG_UNREDACTED_DATA == 'true':
+        return value
+    return "<REDACTED>"
 
 
 def dict_redact(data: dict) -> dict:

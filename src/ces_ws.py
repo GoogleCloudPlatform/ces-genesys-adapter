@@ -24,7 +24,7 @@ import websockets
 from websockets.connection import State
 
 from .auth import auth_provider
-from .redaction import redact
+from .redaction import redact, redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,19 @@ class CESWS:
         self.ratecv_state_to_va = None
         self.ratecv_state_to_genesys = None
         self.audio_out_queue = asyncio.Queue()
+        self.audio_out_queue = asyncio.Queue()
+        self._stop_pacer_event = asyncio.Event()
+
+    def _get_log_extra(self, extra=None):
+        base_extra = {
+            "ces_session_id": self.session_id,
+        }
+        if self.genesys_ws:
+             base_extra.update(self.genesys_ws._get_log_extra())
+        
+        if extra:
+            base_extra.update(extra)
+        return base_extra
 
     def is_connected(self):
         return self.websocket and self.websocket.state == State.OPEN
@@ -51,30 +64,37 @@ class CESWS:
         self.session_id = f"{agent_id}/sessions/{uuid.uuid4()}"
         self.deployment_id = deployment_id
 
-        _, project_id = google.auth.default()
-
         try:
-            parts = agent_id.split("/")
-            location_index = parts.index("locations")
-            location = parts[location_index + 1]
-        except (ValueError, IndexError):
-            logger.error(f"Could not extract location from agent_id: {agent_id}")
-            return
+            _, project_id = google.auth.default()
 
-        token = await auth_provider.get_token()
+            try:
+                parts = agent_id.split("/")
+                location_index = parts.index("locations")
+                location = parts[location_index + 1]
+            except (ValueError, IndexError):
+                logger.error("Could not extract location from agent_id", extra=self._get_log_extra({"agent_id": agent_id}))
+                return False
 
-        ws_url = f"{_BASE_WS_URL}{location}"
+            token = await auth_provider.get_token()
+            ws_url = f"{_BASE_WS_URL}{location}"
 
-        logger.info(f"Connecting to CES at {ws_url}")
-        self.websocket = await websockets.connect(
-            ws_url,
-            additional_headers={
-                "Authorization": f"Bearer {token}",
-                "X-Goog-User-Project": project_id,
-            },
-        )
-        logger.info("Connected to CES")
-        await self.send_config_message()
+            logger.info("Connecting to CES", extra=self._get_log_extra({"url": ws_url}))
+            self.websocket = await websockets.connect(
+                ws_url,
+                additional_headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Goog-User-Project": project_id,
+                },
+                max_size=4 * 1024 * 1024  # Increase limit to 4MiB to prevent message size errors
+            )
+            logger.info("Connected to CES", extra=self._get_log_extra())
+            await self.send_config_message()
+            return True
+        except Exception as e:
+            logger.error("Error during CES connect/config", exc_info=True, extra=self._get_log_extra())
+            if not self.genesys_ws.disconnect_initiated:
+                await self.genesys_ws.send_disconnect("error", info=f"CES Connection/Config Error: {e}")
+            return False
 
     async def send_config_message(self):
         config_message = {
@@ -84,47 +104,115 @@ class CESWS:
                     "audioEncoding": "LINEAR16",
                     "sampleRateHertz": 16000,
                 },
-                "outputAudioConfig": {
-                    "audioEncoding": "LINEAR16",
+                "outputAudioConfig": {                    "audioEncoding": "LINEAR16",
                     "sampleRateHertz": 16000,
                 },
             }
         }
         if self.deployment_id:
             config_message["config"]["deployment"] = self.deployment_id
-        await self.websocket.send(json.dumps(config_message))
-        logger.info(f"Sent config message to CES: {config_message}")
+        try:
+            await self.websocket.send(json.dumps(config_message))
+        except Exception as e:
+            logger.error("Error sending config message to CES", exc_info=True, extra=self._get_log_extra())
+            raise
+        logger.info("Sent config message to CES", extra=self._get_log_extra({"data": config_message}))
 
         kickstart_message = {"realtimeInput": {"text": "Hello"}}
-        await self.websocket.send(json.dumps(kickstart_message))
-        logger.info(f"Sent kickstart message to CES: {kickstart_message}")
+        try:
+            await self.websocket.send(json.dumps(kickstart_message))
+        except Exception as e:
+            logger.error("Error sending kickstart message to CES", exc_info=True, extra=self._get_log_extra())
+            raise
+        logger.info("Sent kickstart message to CES", extra=self._get_log_extra({"data": kickstart_message}))
 
         if self.genesys_ws.ces_input_variables:
             variables_message = {
                 "realtimeInput": {"variables": self.genesys_ws.ces_input_variables}
             }
-            await self.websocket.send(json.dumps(variables_message))
+            try:
+                await self.websocket.send(json.dumps(variables_message))
+            except Exception as e:
+                logger.error("Error sending variables message to CES", exc_info=True, extra=self._get_log_extra())
+                raise
             redacted_variables_message = redact(variables_message)
-            logger.info(f"Sent variables to CES: {redacted_variables_message}")
+            logger.info("Sent variables to CES", extra=self._get_log_extra({"data": redacted_variables_message}))
 
     async def send_audio(self, audio_chunk):
         linear_audio_8k = audioop.ulaw2lin(audio_chunk, 2)
         linear_audio_16k, self.ratecv_state_to_va = audioop.ratecv(
             linear_audio_8k, 2, 1, 8000, 16000, self.ratecv_state_to_va
         )
+        logger.info("CESWS: send_audio: Converted to L16", extra=self._get_log_extra({"audio_size": len(linear_audio_16k)}))
         base64_pcm_payload = base64.b64encode(linear_audio_16k).decode("utf-8")
         va_input = {"realtimeInput": {"audio": base64_pcm_payload}}
         if self.is_connected():
-            await self.websocket.send(json.dumps(va_input))
+            try:
+                await self.websocket.send(json.dumps(va_input))
+            except Exception as e:
+                logger.error("Error sending audio to CES", exc_info=True, extra=self._get_log_extra())
+                # Not re-raising here, as audio send failures are less critical than config messages
+                await self.genesys_ws.send_disconnect("error", info=f"CES Send Audio Error: {e}")
+
+    async def send_dtmf(self, digit): # Adding DTMF support
+        logger.info("Attempting to send DTMF", extra=self._get_log_extra({"digit": redact_value(digit)}))
+        dtmf_message = {"realtimeInput": {"dtmf": digit}}
+        connected = self.is_connected()
+        logger.info("CES WS connected state", extra=self._get_log_extra({"connected": connected}))
+        if connected:
+            try:
+                await self.websocket.send(json.dumps(dtmf_message))
+                logger.info("Sent DTMF to CES", extra=self._get_log_extra({"digit": redact_value(digit)}))
+            except Exception as e:
+                logger.error("Error sending DTMF to CES", exc_info=True, extra=self._get_log_extra({"digit": redact_value(digit), "error": str(e)}))
+                error_type = "DTMF_FAILURE"
+                error_details = {"digit": redact_value(digit), "originalError": str(e)}
+                if "INVALID_ARGUMENT" in str(e) or "Invalid value" in str(e):
+                    error_type = "API_INVALID_ARGUMENT"
+                    error_details["violatedField"] = "realtime_input.dtmf"
+                elif "DEADLINE_EXCEEDED" in str(e):
+                    error_type = "API_DEADLINE_EXCEEDED"
+
+                await self.genesys_ws.send_error_report(
+                    errorType=error_type,
+                    errorMessage="Failed to send DTMF to CES.",
+                    source="CESWS.send_dtmf",
+                    details=error_details
+                )
+        else:
+            logger.warning("Cannot send DTMF, CES WS not connected", extra=self._get_log_extra({"digit": redact_value(digit)}))
+
+    async def stop_audio(self):
+        logger.info("Stopping audio pacer", extra=self._get_log_extra())
+        self._stop_pacer_event.set()
+        # Clear the queue to unblock pacer if it's waiting
+        while not self.audio_out_queue.empty():
+            try:
+                self.audio_out_queue.get_nowait()
+                self.audio_out_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        logger.info("Audio output queue cleared", extra=self._get_log_extra())
 
     async def listen(self):
-        try:
-            while self.is_connected():
+        while self.is_connected():
+            try:
                 message = await self.websocket.recv()
                 data = json.loads(message)
 
-                if "sessionOutput" in data and "audio" in data["sessionOutput"]:
+                if "interruptionSignal" in data:
+                    logger.info("Received InterruptionSignal from CES", extra=self._get_log_extra())
+                    # Clear the audio out queue
+                    while not self.audio_out_queue.empty():
+                        try:
+                            self.audio_out_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    logger.info("Cleared audio output queue due to InterruptionSignal", extra=self._get_log_extra())
+
+                elif "sessionOutput" in data and "audio" in data["sessionOutput"]:
                     linear_audio_16k = base64.b64decode(data["sessionOutput"]["audio"])
+                    logger.info("CESWS: listen: Received L16 audio", extra=self._get_log_extra({"audio_size": len(linear_audio_16k), "channels": 1}))
                     linear_audio_8k, self.ratecv_state_to_genesys = audioop.ratecv(
                         linear_audio_16k,
                         2,
@@ -134,53 +222,102 @@ class CESWS:
                         self.ratecv_state_to_genesys,
                     )
                     mulaw_audio = audioop.lin2ulaw(linear_audio_8k, 2)
+                    logger.info("CESWS: listen: Converted to mulaw", extra=self._get_log_extra({"audio_size": len(mulaw_audio), "channels": 1}))
                     await self.audio_out_queue.put(mulaw_audio)
 
                 elif "sessionOutput" in data and "text" in data["sessionOutput"]:
                     text = data['sessionOutput']['text']
                     redacted_text = redact(text)
-                    logger.info(
-                        f"Received text from CES: {redacted_text}"
-                    )
+                    logger.info("Received text from CES", extra=self._get_log_extra({"text": redacted_text}))
 
                 elif "endSession" in data:
-                    logger.info(f"Received endSession from CES: {data}")
+                    logger.info("Received endSession from CES", extra=self._get_log_extra({"data": data}))
                     metadata = data.get("endSession", {}).get("metadata", {})
                     params = metadata.get("params")
-                    await self.genesys_ws.send_disconnect("completed", params=params)
+                    await self.genesys_ws.send_disconnect("completed", info="Session has ended successfully in CES", output_variables=params)
 
                 elif "recognitionResult" in data:
                     pass
 
                 else:
-                    # To avoid too much noise, we don't log every message.
-                    # logger.warning(f"Received unknown message from CES: {data}")
-                    pass
-        except Exception as e:
-            logger.error(f"Error in CES listener: {e}")
+                    logger.warning("Received unhandled message from CES", extra=self._get_log_extra({"data": redact(data)}))
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.info("CES WS connection closed", extra=self._get_log_extra({"code": e.code, "reason": e.reason}))
+                if not self.genesys_ws.disconnect_initiated:
+                     await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
+                break
+            except Exception as e:
+                logger.error("Error in CES listener", extra=self._get_log_extra(), exc_info=True)
+                if not self.genesys_ws.disconnect_initiated:
+                    await self.genesys_ws.send_disconnect("error", info=f"CES Listen Error: {e}")
+                break
 
     async def pacer(self):
-        logger.info("Starting audio pacer for Genesys")
+        logger.info("Starting audio pacer for Genesys", extra=self._get_log_extra())
+        MAX_GENESYS_CHUNK_SIZE = 32000  # Bytes
+        MIN_INTERVAL = 0.2  # Seconds (200ms)
         try:
-            while True:
-                audio_chunk = await self.audio_out_queue.get()
-                await self.genesys_ws.websocket.send(audio_chunk)
+            while not self._stop_pacer_event.is_set():
+                try:
+                    audio_chunk = await asyncio.wait_for(self.audio_out_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue # Check stop event
+
+                logger.info("CESWS: pacer: Received from queue", extra=self._get_log_extra({"audio_size": len(audio_chunk)}))
+
+                if not self.genesys_ws.websocket or self.genesys_ws.websocket.state == self.websocket.protocol.state.CLOSED:
+                    logger.warning("Genesys WS closed, discarding audio chunk", extra=self._get_log_extra())
+                    self.audio_out_queue.task_done()
+                    continue
+
+                start_time = asyncio.get_event_loop().time()
+                offset = 0
+                while offset < len(audio_chunk):
+                    if self._stop_pacer_event.is_set():
+                        logger.info("Pacer stop event set mid-chunk", extra=self._get_log_extra())
+                        break
+                        
+                    end = min(offset + MAX_GENESYS_CHUNK_SIZE, len(audio_chunk))
+                    chunk_to_send = audio_chunk[offset:end]
+                    logger.info("CESWS: pacer: Sending to binary Genesys", extra=self._get_log_extra({"audio_size": len(chunk_to_send)}))
+                    try:
+                        await self.genesys_ws.websocket.send(chunk_to_send)
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("Genesys WS closed during send", extra=self._get_log_extra())
+                        break  # Exit inner while
+                    offset = end
+                
+                if self._stop_pacer_event.is_set():
+                    self.audio_out_queue.task_done()
+                    continue
+                
+                if offset < len(audio_chunk): # Connection was closed mid-chunk
+                    self.audio_out_queue.task_done()
+                    continue
+
+                send_duration = asyncio.get_event_loop().time() - start_time
+                sleep_duration = max(0, MIN_INTERVAL - send_duration)
+                logger.info("Pacer sent chunk batch", extra=self._get_log_extra({"send_duration": send_duration, "sleep_duration": sleep_duration}))
+                if not self._stop_pacer_event.is_set():
+                    await asyncio.sleep(sleep_duration)
+
                 self.audio_out_queue.task_done()
-                # Dynamically sleep based on the size of the audio chunk to ensure
-                # real-time pacing. The audio is 8000Hz PCMU, which is 1 byte per
-                # sample.
-                duration_in_seconds = len(audio_chunk) / 8000.0
-                await asyncio.sleep(duration_in_seconds)
+
+        except asyncio.CancelledError:
+            logger.info("Pacer task cancelled", extra=self._get_log_extra())
+            raise
         except websockets.exceptions.ConnectionClosed:
-            logger.info("Genesys websocket connection closed, pacer stopped.")
+            logger.info("Genesys websocket connection closed, pacer stopped", extra=self._get_log_extra())
         except Exception as e:
-            logger.error(f"Unexpected error in pacer: {e}", exc_info=True)
-        logger.info("Audio pacer for Genesys stopped")
+            logger.error("Unexpected error in pacer", extra=self._get_log_extra(), exc_info=True)
+            if not self.genesys_ws.disconnect_initiated:
+                await self.genesys_ws.send_disconnect("error", info=f"Pacer Error: {e}")
+        logger.info("Audio pacer for Genesys stopped", extra=self._get_log_extra())
 
     async def close(self):
         """Closes the WebSocket connection to CES."""
         if self.is_connected():
-            logger.info("Closing WebSocket connection to CES.")
+            logger.info("Closing WebSocket connection to CES", extra=self._get_log_extra())
             await self.websocket.close()
         else:
-            logger.info("WebSocket connection to CES was already closed.")
+            logger.info("WebSocket connection to CES was already closed", extra=self._get_log_extra())
