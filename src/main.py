@@ -22,9 +22,13 @@ import websockets
 from . import config
 from .auth import auth_provider
 from .genesys_ws import GenesysWS
+from .logging_utils import setup_logger
+from .redaction import redact
 
-logging.basicConfig(level=logging.INFO)
+# Setup JSON logging for the entire application
+setup_logger()
 logger = logging.getLogger(__name__)
+logger.info("Using websockets version", extra={"version": websockets.__version__})
 
 
 def process_request(connection, request):
@@ -39,7 +43,7 @@ def process_request(connection, request):
 
     # For all other paths, proceed with WebSocket authentication.
     if not auth_provider.verify_request(request):
-        logger.info(f"Request came in with path: {request.path}")
+        logger.info("Request came in", extra={"path": request.path})
         logger.warning("WebSocket connection rejected: invalid API key or signature.")
         return connection.respond(http.HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
 
@@ -52,7 +56,7 @@ async def handler(websocket):
     """
     This function is called for each incoming WebSocket connection.
     """
-    logger.info(f"New connection from {websocket.remote_address}")
+    logger.info("New connection", extra={"remote_address": websocket.remote_address})
     genesys_ws = GenesysWS(websocket)
     await genesys_ws.handle_connection()
 
@@ -67,8 +71,8 @@ async def main():
 
     if config.AUTH_TOKEN_SECRET_PATH:
         logger.info(
-            "Authenticating to CES using token-based auth from secret:"
-            f"{config.AUTH_TOKEN_SECRET_PATH}"
+            "Authenticating to CES using token-based auth",
+            extra={"secret_path": config.AUTH_TOKEN_SECRET_PATH}
         )
     else:
         logger.info(
@@ -78,12 +82,13 @@ async def main():
     if config.GENESYS_CLIENT_SECRET:
         logger.info("Genesys signature verification is enabled.")
 
-    logger.info(f"Starting WebSocket server on port {config.PORT}")
+    logger.info("Starting WebSocket server", extra={"port": config.PORT})
 
     # For older versions of `websockets`, we must catch the exception
     # raised by plain HTTP requests (like health checks) to prevent crashes.
     async with websockets.serve(
-        handler, "0.0.0.0", config.PORT, process_request=process_request
+        handler, "0.0.0.0", config.PORT, process_request=process_request,
+        max_size=4 * 1024 * 1024  # Increase limit to 4 MiB
     ) as server:
         await server.serve_forever()
 

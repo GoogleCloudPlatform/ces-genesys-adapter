@@ -61,7 +61,7 @@ class Auth:
             secret_path = f"{secret_path}/versions/latest"
 
         try:
-            logger.info(f"Fetching auth token from secret manager: {secret_path}")
+            logger.info("Fetching auth token from secret manager", extra={"secret_path": secret_path})
             response = self._sm_client.access_secret_version(name=secret_path)
             payload = response.payload.data.decode("UTF-8")
             token_data = json.loads(payload)
@@ -76,7 +76,7 @@ class Auth:
             logger.info("Successfully loaded auth token from Secret Manager.")
         except Exception as e:
             logger.error(
-                f"Failed to load auth token from Secret Manager: {e}", exc_info=True
+                "Failed to load auth token from Secret Manager", exc_info=True, extra={"error": str(e)}
             )
             # If we fail, clear the token info to force a retry on the next call.
             self._token_info = {}
@@ -140,8 +140,8 @@ class Auth:
                         header_value = headers.get(component_name)
                         if header_value is None:
                             logger.error(
-                                "Missing required header for signature: "
-                                f"{component_name}"
+                                "Missing required header for signature",
+                                extra={"header": component_name}
                             )
                             return False
                         signature_base_lines.append(
@@ -169,8 +169,9 @@ class Auth:
 
             except Exception as e:
                 logger.error(
-                    f"An error occurred during signature verification: {e}",
+                    "An error occurred during signature verification",
                     exc_info=True,
+                    extra={"error": str(e)}
                 )
                 return False
 
