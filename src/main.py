@@ -28,7 +28,7 @@ from .redaction import redact
 # Setup JSON logging for the entire application
 setup_logger()
 logger = logging.getLogger(__name__)
-logger.info("Using websockets version", extra={"version": websockets.__version__})
+logger.info("Using websockets version", extra={"log_type": "init", "version": websockets.__version__})
 
 
 def process_request(connection, request):
@@ -43,12 +43,12 @@ def process_request(connection, request):
 
     # For all other paths, proceed with WebSocket authentication.
     if not auth_provider.verify_request(request):
-        logger.info("Request came in", extra={"path": request.path})
-        logger.warning("WebSocket connection rejected: invalid API key or signature.")
+        logger.info("Request came in", extra={"log_type": "auth", "path": request.path})
+        logger.warning("WebSocket connection rejected: invalid API key or signature.", extra={"log_type": "auth_error"})
         return connection.respond(http.HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
 
     # If authentication is successful, return None to proceed with the handshake.
-    logger.info("WebSocket connection authenticated successfully.")
+    logger.info("WebSocket connection authenticated successfully.", extra={"log_type": "auth"})
     return None
 
 
@@ -56,7 +56,7 @@ async def handler(websocket):
     """
     This function is called for each incoming WebSocket connection.
     """
-    logger.info("New connection", extra={"remote_address": websocket.remote_address})
+    logger.info("New connection", extra={"log_type": "connection_start", "remote_address": websocket.remote_address})
     genesys_ws = GenesysWS(websocket)
     await genesys_ws.handle_connection()
 
@@ -66,23 +66,24 @@ async def main():
     This is the main entry point of the application.
     """
     if not config.GENESYS_API_KEY:
-        logger.error("GENESYS_API_KEY environment variable not set.")
+        logger.error("GENESYS_API_KEY environment variable not set.", extra={"log_type": "config_error"})
         sys.exit(1)
 
     if config.AUTH_TOKEN_SECRET_PATH:
         logger.info(
             "Authenticating to CES using token-based auth",
-            extra={"secret_path": config.AUTH_TOKEN_SECRET_PATH}
+            extra={"log_type": "config", "secret_path": config.AUTH_TOKEN_SECRET_PATH}
         )
     else:
         logger.info(
-            "Authenticating to CES using Application Default Credentials (ADC)."
+            "Authenticating to CES using Application Default Credentials (ADC).",
+            extra={"log_type": "config"}
         )
 
     if config.GENESYS_CLIENT_SECRET:
-        logger.info("Genesys signature verification is enabled.")
+        logger.info("Genesys signature verification is enabled.", extra={"log_type": "config"})
 
-    logger.info("Starting WebSocket server", extra={"port": config.PORT})
+    logger.info("Starting WebSocket server", extra={"log_type": "init", "port": config.PORT})
 
     # For older versions of `websockets`, we must catch the exception
     # raised by plain HTTP requests (like health checks) to prevent crashes.
@@ -97,4 +98,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Server stopped manually.")
+        logger.info("Server stopped manually.", extra={"log_type": "shutdown"})

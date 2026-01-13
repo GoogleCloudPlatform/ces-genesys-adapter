@@ -146,22 +146,6 @@ The adapter will process this and include the following `outputVariables` in the
 
 This data can then be used in your Genesys Architect flow for routing decisions, data lookup, or reporting.
 
-### Changelog
-
-Recent updates and improvements:
-
-1.  **Barge-in Handling**: Added support for `InterruptionSignal` from CES to handle customer barge-ins, clearing the outbound audio queue. [renibot]
-2.  **DTMF Support**: Implemented handling of DTMF messages from Genesys, forwarding digits to CES. [renibot]
-3.  **Improved Audio Streaming**: Adjusted audio format and handling to better align with Genesys Audio Connector requirements. [renibot]
-4.  **Audio Chunking**: Introduced audio chunking (32KB every 200ms) to prevent audio frame issues and improve stability with Genesys. [renibot]
-5.  **Structured JSON Logging**: Implemented `logging_utils.py` for structured Cloud Logging, enriching logs with session IDs and other context. [renibot]
-6.  **Robust Error Handling**: Added comprehensive `try...except` blocks in WebSocket send/receive loops and async task management in both `genesys_ws.py` and `ces_ws.py` to catch errors and trigger graceful disconnects. [renibot]
-7.  **Graceful Shutdown**: Enhanced the `send_disconnect` logic to ensure the audio output queue is fully drained before closing WebSocket connections. [renibot]
-8.  **Prevent Duplicate Disconnects**: Introduced a `disconnect_initiated` flag in `GenesysWS` to prevent multiple disconnect messages from being sent during a single closure event. [renibot]
-9.  **endSession Metadata Passthrough**: Ensured that the `params` from the CES `endSession` message are correctly passed as `outputVariables` in the disconnect message to Genesys. [renibot]
-10. **AudioHook Protocol Fixes**: Addressed issues resulting in AUDIOHOOK-0004 and AUDIOHOOK-0009 errors in the end of session handling. [renibot]
-11. **Dynamic Initial Message**: Added support for `_initial_message` in input variables, allowing the custom configuration of the conversation kickstart message (defaulting to "Hello"). [aiestaran]
-
 ### Step 2: Run the Deployment Script
 
 Once your `values.sh` file is configured, run the deploy script:
