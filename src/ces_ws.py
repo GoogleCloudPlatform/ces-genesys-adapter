@@ -60,9 +60,10 @@ class CESWS:
     def is_connected(self):
         return self.websocket and self.websocket.state == State.OPEN
 
-    async def connect(self, agent_id, deployment_id=None):
+    async def connect(self, agent_id, deployment_id=None, initial_message=None):
         self.session_id = f"{agent_id}/sessions/{uuid.uuid4()}"
         self.deployment_id = deployment_id
+        self.initial_message = initial_message
 
         try:
             _, project_id = google.auth.default()
@@ -120,7 +121,8 @@ class CESWS:
             raise
         logger.info("Sent config message to CES", extra=self._get_log_extra({"data": config_message}))
 
-        kickstart_message = {"realtimeInput": {"text": "Hello"}}
+        kickstart_text = self.initial_message if self.initial_message else "Hello"
+        kickstart_message = {"realtimeInput": {"text": kickstart_text}}
         try:
             await self.websocket.send(json.dumps(kickstart_message))
         except Exception as e:

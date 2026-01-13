@@ -89,6 +89,7 @@ class GenesysWS:
                 self.agent_id = None
 
                 if not self.is_probe:
+                    self.initial_message = None
                     if self.input_variables:
                         if "_deployment_id" in self.input_variables:
                             self.deployment_id = self.input_variables["_deployment_id"]
@@ -109,6 +110,9 @@ class GenesysWS:
                         elif "_agent_id" in self.input_variables:
                             self.agent_id = self.input_variables["_agent_id"]
 
+                        if "_initial_message" in self.input_variables:
+                            self.initial_message = self.input_variables["_initial_message"]
+
                         self.ces_input_variables = {
                             k: v
                             for k, v in self.input_variables.items()
@@ -123,7 +127,7 @@ class GenesysWS:
                         )
                         return
 
-                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id):
+                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id, self.initial_message):
                         logger.error("CES connection failed, stopping setup", extra=self._get_log_extra())
                         return # Disconnect is handled within ces_ws.connect
 

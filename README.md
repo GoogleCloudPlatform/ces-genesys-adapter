@@ -104,6 +104,7 @@ Open `script/values.sh` in a text editor and fill in the required values. Key va
 **Note on Agent and Deployment IDs**: You must pass either an agent ID or a deployment ID within the `inputVariables` of the Genesys "open" message.
 *   `_agent_id`: The full agent ID.
 *   `_deployment_id`: The full deployment ID (e.g., `projects/.../deployments/...`). If you provide a deployment ID, the adapter will automatically extract the agent ID from it and include the deployment ID in the request to the conversational agent.
+*   `_initial_message`: (Optional) The initial message text to send to the conversational agent to start the conversation. Defaults to "Hello" if not provided.
 
 You can set these up in Architect (on the Genesys console) when setting up the integration in your flow. Any other variables in `inputVariables` (not starting with an underscore) will be forwarded to CES.
 
@@ -159,6 +160,7 @@ Recent updates and improvements:
 8.  **Prevent Duplicate Disconnects**: Introduced a `disconnect_initiated` flag in `GenesysWS` to prevent multiple disconnect messages from being sent during a single closure event. [renibot]
 9.  **endSession Metadata Passthrough**: Ensured that the `params` from the CES `endSession` message are correctly passed as `outputVariables` in the disconnect message to Genesys. [renibot]
 10. **AudioHook Protocol Fixes**: Addressed issues resulting in AUDIOHOOK-0004 and AUDIOHOOK-0009 errors in the end of session handling. [renibot]
+11. **Dynamic Initial Message**: Added support for `_initial_message` in input variables, allowing the custom configuration of the conversation kickstart message (defaulting to "Hello"). [aiestaran]
 
 ### Step 2: Run the Deployment Script
 
