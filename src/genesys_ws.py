@@ -247,10 +247,9 @@ class GenesysWS:
             disconnect_message["parameters"]["outputVariables"] = {k: str(v) for k, v in output_variables.items()}
 
         if self.ces_ws:
-            logger.info("Stopping audio and waiting for queue to drain...", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
+            logger.info("Stopping audio and clearing queues...", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
             await self.ces_ws.stop_audio()
-            await self.ces_ws.audio_out_queue.join()
-            logger.info("Audio queue drained.", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
+            logger.info("Audio queues cleared by stop_audio.", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
 
         logger.info("Sending disconnect message to Genesys", extra=self._get_log_extra(log_type="genesys_send_disconnect", data={"disconnect_message": redact(disconnect_message)}))
         await self.send_message(disconnect_message)
@@ -261,6 +260,10 @@ class GenesysWS:
         return self.last_server_sequence_number
 
     async def handle_binary_message(self, message):
+        if self.disconnect_initiated:
+            logger.info("GenesysWS: Ignoring binary message during disconnect", extra=self._get_log_extra(log_type="genesys_ignore_binary"))
+            return
+
         logger.info("GenesysWS: Received binary message", extra=self._get_log_extra(log_type="genesys_recv_binary", data={"audio_size": len(message)}))
         if self.ces_ws:
             await self.ces_ws.send_audio(message)

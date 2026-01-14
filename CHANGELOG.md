@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-01-14
+
+### Bug Fixes
+
+1.  **Fixed Audio Leakage after Session End:**
+    -   **Issue:** Genesys audio continued to be sent to CES even after CES initiated an `endSession`, potentially causing confusion or errors in late-state processing.
+    -   **Fix:** Updated `GenesysWS.handle_binary_message` to check if a disconnect has been initiated. If so, incoming binary (audio) messages are ignored and logged with `log_type="genesys_ignore_binary"`.
+    -   **Impact:** Ensures correct session termination flow where audio from Genesys is stopped immediately upon CES session end.
+
+2.  **Resolved Disconnect Hang on Audio Queue Drain & AttributeError:**
+    -   **Issue:** The adapter failed to send the `disconnect` message to Genesys, most notably in scenarios with high audio traffic from Genesys. The root cause evolved, but the symptom was `GenesysWS.send_disconnect` not completing. An `AttributeError` for `pacer_task` also occurred.
+    -   **Cause:** Initial issues included the `pacer` task not stopping cleanly and `self.pacer_task` not being initialized. The final issue was an unnecessary and blocking `await self.ces_ws.audio_out_queue.join()` call in `GenesysWS.send_disconnect`.
+    -   **Fix:**
+        -   Initialized `self.pacer_task = None` and `self.audio_in_queue` in `CESWS.__init__`.
+        -   Modified `CESWS.stop_audio` to explicitly cancel the pacer task and clear both `audio_out_queue` and `audio_in_queue`.
+        -   Updated `CESWS.pacer` to handle `asyncio.CancelledError` gracefully, use `asyncio.wait_for` for non-blocking gets, and ensure `task_done()` is called via a `finally` block.
+        -   **Removed the `await self.ces_ws.audio_out_queue.join()` call from `GenesysWS.send_disconnect`.**
+        -   Added `await self.close()` in `CESWS.listen` after handling `endSession` to close the WebSocket to CES promptly.
+    -   **Impact:** Ensures reliable and prompt shutdown. The `disconnect` message is now consistently sent to Genesys, and the CES WebSocket is closed as expected.
+
+---
+
 ## 2026-01-13
 
 ### Bug Fixes
@@ -37,6 +59,7 @@
         -   `genesys_send_disconnect`: 'disconnect' message sent to Genesys.
         -   `genesys_send_closed`: 'closed' message sent to Genesys.
         -   `genesys_probe`: Detected connection probe from Genesys.
+        -   `genesys_ignore_binary`: Ignored binary message during disconnect.
         -   `genesys_recv_dtmf`: DTMF received from Genesys.
         -   `genesys_custom_config`: Custom config received from Genesys.
         -   `genesys_error`: General error in Genesys WebSocket handling.

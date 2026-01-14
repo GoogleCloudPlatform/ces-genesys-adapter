@@ -6,3 +6,4 @@ __pycache__/
 .env
 script/values.sh
 tmp
+test_logs/
