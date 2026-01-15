@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import audioop
 import base64
 import json
 import logging
@@ -40,11 +39,10 @@ class CESWS:
         self.websocket = None
         self.session_id = None
         self.deployment_id = None
-        self.ratecv_state_to_va = None
-        self.ratecv_state_to_genesys = None
-        self.audio_out_queue = asyncio.Queue()
-        self.audio_out_queue = asyncio.Queue()
+        self.audio_in_queue = asyncio.Queue() # Genesys to CES
+        self.audio_out_queue = asyncio.Queue() # CES to Genesys
         self._stop_pacer_event = asyncio.Event()
+        self.pacer_task = None
 
     def _get_log_extra(self, log_type: str, data: dict = None):
         extra = {
@@ -106,11 +104,11 @@ class CESWS:
             "config": {
                 "session": self.session_id,
                 "inputAudioConfig": {
-                    "audioEncoding": "LINEAR16",
-                    "sampleRateHertz": 16000,
+                    "audioEncoding": "MULAW",
+                    "sampleRateHertz": 8000,
                 },
-                "outputAudioConfig": {                    "audioEncoding": "LINEAR16",
-                    "sampleRateHertz": 16000,
+                "outputAudioConfig": {                    "audioEncoding": "MULAW",
+                    "sampleRateHertz": 8000,
                 },
             }
         }
@@ -135,13 +133,10 @@ class CESWS:
         logger.info("Sent kickstart message to CES", extra=self._get_log_extra(log_type="ces_send_kickstart", data={"data": kickstart_message}))
 
     async def send_audio(self, audio_chunk):
-        linear_audio_8k = audioop.ulaw2lin(audio_chunk, 2)
-        linear_audio_16k, self.ratecv_state_to_va = audioop.ratecv(
-            linear_audio_8k, 2, 1, 8000, 16000, self.ratecv_state_to_va
-        )
-        logger.info("CESWS: send_audio: Converted to L16", extra=self._get_log_extra(log_type="ces_send_audio_convert", data={"audio_size": len(linear_audio_16k)}))
-        base64_pcm_payload = base64.b64encode(linear_audio_16k).decode("utf-8")
-        va_input = {"realtimeInput": {"audio": base64_pcm_payload}}
+        # Audio from Genesys is already 8kHz MULAW
+        logger.debug("CESWS: send_audio: Received MULAW audio", extra=self._get_log_extra(log_type="ces_send_audio_recv", data={"audio_size": len(audio_chunk)}))
+        base64_mulaw_payload = base64.b64encode(audio_chunk).decode("utf-8")
+        va_input = {"realtimeInput": {"audio": base64_mulaw_payload}}
         if self.is_connected():
             try:
                 await self.websocket.send(json.dumps(va_input))
@@ -179,16 +174,40 @@ class CESWS:
             logger.warning("Cannot send DTMF, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_dtmf_error", data={"digit": redact_value(digit)}))
 
     async def stop_audio(self):
-        logger.info("Stopping audio pacer", extra=self._get_log_extra(log_type="ces_pacer_stop"))
+        logger.info("Stopping audio pacer and clearing queues", extra=self._get_log_extra(log_type="ces_pacer_stop"))
         self._stop_pacer_event.set()
-        # Clear the queue to unblock pacer if it's waiting
+        if self.pacer_task:
+            self.pacer_task.cancel()
+            try:
+                await self.pacer_task
+            except asyncio.CancelledError:
+                logger.info("Pacer task cancelled as expected", extra=self._get_log_extra(log_type="ces_pacer_stop"))
+            except Exception as e:
+                logger.error("Error during pacer task cancellation", extra=self._get_log_extra(log_type="ces_pacer_error"), exc_info=True)
+            self.pacer_task = None
+
+        # Clear any remaining items in the OUTBOUND queue (CES to Genesys)
         while not self.audio_out_queue.empty():
             try:
                 self.audio_out_queue.get_nowait()
                 self.audio_out_queue.task_done()
             except asyncio.QueueEmpty:
                 break
-        logger.info("Audio output queue cleared", extra=self._get_log_extra(log_type="ces_pacer_stop"))
+            except ValueError:
+                break
+        logger.info("Audio OUTBOUND queue cleared", extra=self._get_log_extra(log_type="ces_pacer_stop"))
+
+        # Clear any remaining items in the INBOUND queue (Genesys to CES)
+        while not self.audio_in_queue.empty():
+            try:
+                self.audio_in_queue.get_nowait()
+                self.audio_in_queue.task_done()  # Call task_done for consistency
+            except asyncio.QueueEmpty:
+                break
+            except ValueError:
+                 # Should not happen if task_done is only called here for this queue
+                 pass
+        logger.info("Audio INBOUND queue cleared", extra=self._get_log_extra(log_type="ces_inbound_queue_clear"))
 
     async def listen(self):
         while self.is_connected():
@@ -207,18 +226,9 @@ class CESWS:
                     logger.info("Cleared audio output queue due to InterruptionSignal", extra=self._get_log_extra(log_type="ces_recv_interruption"))
 
                 elif "sessionOutput" in data and "audio" in data["sessionOutput"]:
-                    linear_audio_16k = base64.b64decode(data["sessionOutput"]["audio"])
-                    logger.info("CESWS: listen: Received L16 audio", extra=self._get_log_extra(log_type="ces_recv_audio", data={"audio_size": len(linear_audio_16k), "channels": 1}))
-                    linear_audio_8k, self.ratecv_state_to_genesys = audioop.ratecv(
-                        linear_audio_16k,
-                        2,
-                        1,
-                        16000,
-                        8000,
-                        self.ratecv_state_to_genesys,
-                    )
-                    mulaw_audio = audioop.lin2ulaw(linear_audio_8k, 2)
-                    logger.info("CESWS: listen: Converted to mulaw", extra=self._get_log_extra(log_type="ces_recv_audio_convert", data={"audio_size": len(mulaw_audio), "channels": 1}))
+                    # Audio from CES is now 8kHz MULAW
+                    mulaw_audio = base64.b64decode(data["sessionOutput"]["audio"])
+                    logger.debug("CESWS: listen: Received MULAW audio", extra=self._get_log_extra(log_type="ces_recv_audio", data={"audio_size": len(mulaw_audio)}))
                     await self.audio_out_queue.put(mulaw_audio)
 
                 elif "sessionOutput" in data and "text" in data["sessionOutput"]:
@@ -230,7 +240,10 @@ class CESWS:
                     logger.info("Received endSession from CES", extra=self._get_log_extra(log_type="ces_recv_endsession", data={"data": data}))
                     metadata = data.get("endSession", {}).get("metadata", {})
                     params = metadata.get("params")
-                    await self.genesys_ws.send_disconnect("completed", info="Session has ended successfully in CES", output_variables=params)
+                    if not self.genesys_ws.disconnect_initiated:
+                        asyncio.create_task(self.genesys_ws.send_disconnect("completed", info="Session has ended successfully in CES", output_variables=params))
+                    await self.close() # Close CES connection
+                    break # Exit listener loop
 
                 elif "recognitionResult" in data:
                     pass
@@ -257,50 +270,56 @@ class CESWS:
         MIN_INTERVAL = 0.2  # Seconds (200ms)
         try:
             while not self._stop_pacer_event.is_set():
+                audio_chunk = None # Initialize audio_chunk
                 try:
-                    audio_chunk = await asyncio.wait_for(self.audio_out_queue.get(), timeout=0.1)
+                    audio_chunk = await asyncio.wait_for(self.audio_out_queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue # Check stop event
 
-                logger.info("CESWS: pacer: Received from queue", extra=self._get_log_extra(log_type="ces_pacer_queue_recv", data={"audio_size": len(audio_chunk)}))
+                try: # NEW try block for task_done
+                    logger.info("CESWS: pacer: Received from queue", extra=self._get_log_extra(log_type="ces_pacer_queue_recv", data={"audio_size": len(audio_chunk)}))
 
-                if not self.genesys_ws.websocket or self.genesys_ws.websocket.state == self.websocket.protocol.state.CLOSED:
-                    logger.warning("Genesys WS closed, discarding audio chunk", extra=self._get_log_extra(log_type="ces_pacer_discard"))
-                    self.audio_out_queue.task_done()
-                    continue
+                    if not self.genesys_ws.websocket or self.genesys_ws.websocket.state == self.websocket.protocol.state.CLOSED:
+                        logger.warning("Genesys WS closed, discarding audio chunk", extra=self._get_log_extra(log_type="ces_pacer_discard"))
+                        continue
 
-                start_time = asyncio.get_event_loop().time()
-                offset = 0
-                while offset < len(audio_chunk):
-                    if self._stop_pacer_event.is_set():
-                        logger.info("Pacer stop event set mid-chunk", extra=self._get_log_extra(log_type="ces_pacer_stop_midchunk"))
-                        break
-                        
-                    end = min(offset + MAX_GENESYS_CHUNK_SIZE, len(audio_chunk))
-                    chunk_to_send = audio_chunk[offset:end]
-                    logger.info("CESWS: pacer: Sending to binary Genesys", extra=self._get_log_extra(log_type="ces_pacer_send", data={"audio_size": len(chunk_to_send)}))
+                    start_time = asyncio.get_event_loop().time()
+                    offset = 0
                     try:
-                        await self.genesys_ws.websocket.send(chunk_to_send)
+                        while offset < len(audio_chunk):
+                            if self._stop_pacer_event.is_set():
+                                logger.info("Pacer stop event set mid-chunk", extra=self._get_log_extra(log_type="ces_pacer_stop_midchunk"))
+                                break
+                            
+                            end = min(offset + MAX_GENESYS_CHUNK_SIZE, len(audio_chunk))
+                            chunk_to_send = audio_chunk[offset:end]
+                            # logger.info("CESWS: pacer: Sending to binary Genesys", extra=self._get_log_extra(log_type="ces_pacer_send", data={"audio_size": len(chunk_to_send)}))
+                            await self.genesys_ws.websocket.send(chunk_to_send)
+                            offset = end
                     except websockets.exceptions.ConnectionClosed:
                         logger.warning("Genesys WS closed during send", extra=self._get_log_extra(log_type="ces_pacer_send_error"))
-                        break  # Exit inner while
-                    offset = end
-                
-                if self._stop_pacer_event.is_set():
-                    self.audio_out_queue.task_done()
-                    continue
-                
-                if offset < len(audio_chunk): # Connection was closed mid-chunk
-                    self.audio_out_queue.task_done()
-                    continue
+                        break  # Exit main while loop
+                    except Exception as e:
+                         logger.error("Error sending audio to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send_error"), exc_info=True)
+                         break # Exit main while loop
+                    
+                    if self._stop_pacer_event.is_set():
+                        continue
+                    
+                    if offset < len(audio_chunk): # Connection was closed mid-chunk or other error
+                        continue
 
-                send_duration = asyncio.get_event_loop().time() - start_time
-                sleep_duration = max(0, MIN_INTERVAL - send_duration)
-                logger.info("Pacer sent chunk batch", extra=self._get_log_extra(log_type="ces_pacer_batch_sent", data={"send_duration": send_duration, "sleep_duration": sleep_duration}))
-                if not self._stop_pacer_event.is_set():
-                    await asyncio.sleep(sleep_duration)
-
-                self.audio_out_queue.task_done()
+                    send_duration = asyncio.get_event_loop().time() - start_time
+                    sleep_duration = max(0, MIN_INTERVAL - send_duration)
+                    # logger.info("Pacer sent chunk batch", extra=self._get_log_extra(log_type="ces_pacer_batch_sent", data={"send_duration": send_duration, "sleep_duration": sleep_duration}))
+                    if not self._stop_pacer_event.is_set():
+                        await asyncio.sleep(sleep_duration)
+                finally: # NEW finally block
+                    if audio_chunk:
+                        try:
+                            self.audio_out_queue.task_done()
+                        except ValueError:
+                            pass # Already done
 
         except asyncio.CancelledError:
             logger.info("Pacer task cancelled", extra=self._get_log_extra(log_type="ces_pacer_cancelled"))
@@ -310,7 +329,7 @@ class CESWS:
         except Exception as e:
             logger.error("Unexpected error in pacer", extra=self._get_log_extra(log_type="ces_pacer_error"), exc_info=True)
             if not self.genesys_ws.disconnect_initiated:
-                await self.genesys_ws.send_disconnect("error", info=f"Pacer Error: {e}")
+                 await self.genesys_ws.send_disconnect("error", info=f"Pacer Error: {e}")
         logger.info("Audio pacer for Genesys stopped", extra=self._get_log_extra(log_type="ces_pacer_stopped"))
 
     async def close(self):
