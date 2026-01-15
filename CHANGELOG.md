@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-01-15
+
+### Optimization
+
+1.  **Removed Audio Transcoding:**
+    -   **Change:** Updated the CES `BidiRunSession` configuration in `ces_ws.py` to use `AUDIO_ENCODING_MULAW` at `8000 Hz` for both input and output audio.
+    -   **Impact:** This aligns the audio format with Genesys AudioHook's native 8kHz MULAW. All `audioop` based transcoding (ulaw2lin, lin2ulaw, ratecv) has been removed from `ces_ws.py`, significantly reducing CPU load and potential latency. The adapter now directly passes audio between Genesys and CES.
+
+### Security
+
+1.  **Added Startup Secret Check:**
+    -   **Change:** Added a check in `main.py` to ensure the `GENESYS_CLIENT_SECRET` environment variable is set on startup.
+    -   **Impact:** Prevents the adapter from running without the necessary secret for request signature verification.
+
+---
+
 ## 2026-01-14
 
 ### Bug Fixes

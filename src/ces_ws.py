@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import audioop
 import base64
 import json
 import logging
@@ -40,8 +39,6 @@ class CESWS:
         self.websocket = None
         self.session_id = None
         self.deployment_id = None
-        self.ratecv_state_to_va = None
-        self.ratecv_state_to_genesys = None
         self.audio_in_queue = asyncio.Queue() # Genesys to CES
         self.audio_out_queue = asyncio.Queue() # CES to Genesys
         self._stop_pacer_event = asyncio.Event()
@@ -107,11 +104,11 @@ class CESWS:
             "config": {
                 "session": self.session_id,
                 "inputAudioConfig": {
-                    "audioEncoding": "LINEAR16",
-                    "sampleRateHertz": 16000,
+                    "audioEncoding": "MULAW",
+                    "sampleRateHertz": 8000,
                 },
-                "outputAudioConfig": {                    "audioEncoding": "LINEAR16",
-                    "sampleRateHertz": 16000,
+                "outputAudioConfig": {                    "audioEncoding": "MULAW",
+                    "sampleRateHertz": 8000,
                 },
             }
         }
@@ -136,13 +133,10 @@ class CESWS:
         logger.info("Sent kickstart message to CES", extra=self._get_log_extra(log_type="ces_send_kickstart", data={"data": kickstart_message}))
 
     async def send_audio(self, audio_chunk):
-        linear_audio_8k = audioop.ulaw2lin(audio_chunk, 2)
-        linear_audio_16k, self.ratecv_state_to_va = audioop.ratecv(
-            linear_audio_8k, 2, 1, 8000, 16000, self.ratecv_state_to_va
-        )
-        logger.info("CESWS: send_audio: Converted to L16", extra=self._get_log_extra(log_type="ces_send_audio_convert", data={"audio_size": len(linear_audio_16k)}))
-        base64_pcm_payload = base64.b64encode(linear_audio_16k).decode("utf-8")
-        va_input = {"realtimeInput": {"audio": base64_pcm_payload}}
+        # Audio from Genesys is already 8kHz MULAW
+        logger.debug("CESWS: send_audio: Received MULAW audio", extra=self._get_log_extra(log_type="ces_send_audio_recv", data={"audio_size": len(audio_chunk)}))
+        base64_mulaw_payload = base64.b64encode(audio_chunk).decode("utf-8")
+        va_input = {"realtimeInput": {"audio": base64_mulaw_payload}}
         if self.is_connected():
             try:
                 await self.websocket.send(json.dumps(va_input))
@@ -232,18 +226,9 @@ class CESWS:
                     logger.info("Cleared audio output queue due to InterruptionSignal", extra=self._get_log_extra(log_type="ces_recv_interruption"))
 
                 elif "sessionOutput" in data and "audio" in data["sessionOutput"]:
-                    linear_audio_16k = base64.b64decode(data["sessionOutput"]["audio"])
-                    logger.info("CESWS: listen: Received L16 audio", extra=self._get_log_extra(log_type="ces_recv_audio", data={"audio_size": len(linear_audio_16k), "channels": 1}))
-                    linear_audio_8k, self.ratecv_state_to_genesys = audioop.ratecv(
-                        linear_audio_16k,
-                        2,
-                        1,
-                        16000,
-                        8000,
-                        self.ratecv_state_to_genesys,
-                    )
-                    mulaw_audio = audioop.lin2ulaw(linear_audio_8k, 2)
-                    logger.info("CESWS: listen: Converted to mulaw", extra=self._get_log_extra(log_type="ces_recv_audio_convert", data={"audio_size": len(mulaw_audio), "channels": 1}))
+                    # Audio from CES is now 8kHz MULAW
+                    mulaw_audio = base64.b64decode(data["sessionOutput"]["audio"])
+                    logger.debug("CESWS: listen: Received MULAW audio", extra=self._get_log_extra(log_type="ces_recv_audio", data={"audio_size": len(mulaw_audio)}))
                     await self.audio_out_queue.put(mulaw_audio)
 
                 elif "sessionOutput" in data and "text" in data["sessionOutput"]:

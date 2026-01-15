@@ -69,6 +69,10 @@ async def main():
         logger.error("GENESYS_API_KEY environment variable not set.", extra={"log_type": "config_error"})
         sys.exit(1)
 
+    if not config.GENESYS_CLIENT_SECRET:
+        logger.error("GENESYS_CLIENT_SECRET environment variable not set. This is required for signature verification.", extra={"log_type": "config_error"})
+        sys.exit(1)
+
     if config.AUTH_TOKEN_SECRET_PATH:
         logger.info(
             "Authenticating to CES using token-based auth",
