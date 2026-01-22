@@ -244,7 +244,10 @@ class GenesysWS:
         if info:
             disconnect_message["parameters"]["info"] = info
         if output_variables:
-            disconnect_message["parameters"]["outputVariables"] = {k: json.dumps(v, default=str) for k, v in output_variables.items()}
+            disconnect_message["parameters"]["outputVariables"] = {
+                k: v if isinstance(v, str) else json.dumps(v, default=str)
+                for k, v in output_variables.items()
+            }
 
         if self.ces_ws:
             logger.info("Stopping audio and clearing queues...", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
