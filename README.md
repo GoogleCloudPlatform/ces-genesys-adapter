@@ -105,6 +105,7 @@ Open `script/values.sh` in a text editor and fill in the required values. Key va
 *   `_agent_id`: The full agent ID.
 *   `_deployment_id`: The full deployment ID (e.g., `projects/.../deployments/...`). If you provide a deployment ID, the adapter will automatically extract the agent ID from it and include the deployment ID in the request to the conversational agent.
 *   `_initial_message`: (Optional) The initial message text to send to the conversational agent to start the conversation. Defaults to "Hello" if not provided.
+*   `_session_id`: (Optional) A custom session ID to use for the conversation. If provided, it will be used as the session ID for the CES connection. If not provided, a random UUID will be generated.
 
 You can set these up in Architect (on the Genesys console) when setting up the integration in your flow. Any other variables in `inputVariables` (not starting with an underscore) will be forwarded to CES.
 
@@ -145,6 +146,23 @@ The adapter will process this and include the following `outputVariables` in the
 ```
 
 This data can then be used in your Genesys Architect flow for routing decisions, data lookup, or reporting.
+
+### Changelog
+
+Recent updates and improvements:
+
+1.  **Barge-in Handling**: Added support for `InterruptionSignal` from CES to handle customer barge-ins, clearing the outbound audio queue. [renibot]
+2.  **DTMF Support**: Implemented handling of DTMF messages from Genesys, forwarding digits to CES. [renibot]
+3.  **Improved Audio Streaming**: Adjusted audio format and handling to better align with Genesys Audio Connector requirements. [renibot]
+4.  **Audio Chunking**: Introduced audio chunking (32KB every 200ms) to prevent audio frame issues and improve stability with Genesys. [renibot]
+5.  **Structured JSON Logging**: Implemented `logging_utils.py` for structured Cloud Logging, enriching logs with session IDs and other context. [renibot]
+6.  **Robust Error Handling**: Added comprehensive `try...except` blocks in WebSocket send/receive loops and async task management in both `genesys_ws.py` and `ces_ws.py` to catch errors and trigger graceful disconnects. [renibot]
+7.  **Graceful Shutdown**: Enhanced the `send_disconnect` logic to ensure the audio output queue is fully drained before closing WebSocket connections. [renibot]
+8.  **Prevent Duplicate Disconnects**: Introduced a `disconnect_initiated` flag in `GenesysWS` to prevent multiple disconnect messages from being sent during a single closure event. [renibot]
+9.  **endSession Metadata Passthrough**: Ensured that the `params` from the CES `endSession` message are correctly passed as `outputVariables` in the disconnect message to Genesys. [renibot]
+10. **AudioHook Protocol Fixes**: Addressed issues resulting in AUDIOHOOK-0004 and AUDIOHOOK-0009 errors in the end of session handling. [renibot]
+11. **Dynamic Initial Message**: Added support for `_initial_message` in input variables, allowing the custom configuration of the conversation kickstart message (defaulting to "Hello"). [aiestaran]
+12. **Custom Session ID**: Added support for `_session_id` in input variables, enabling the caller to provide a custom session ID for the CES conversation. [aiestaran]
 
 ### Step 2: Run the Deployment Script
 

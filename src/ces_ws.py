@@ -62,8 +62,8 @@ class CESWS:
     def is_connected(self):
         return self.websocket and self.websocket.state == State.OPEN
 
-    async def connect(self, agent_id, deployment_id=None, initial_message=None):
-        self.session_id = f"{agent_id}/sessions/{uuid.uuid4()}"
+    async def connect(self, agent_id, deployment_id=None, initial_message=None, session_id=None):
+        self.session_id = session_id if session_id else f"{agent_id}/sessions/{uuid.uuid4()}"
         self.deployment_id = deployment_id
         self.initial_message = initial_message
 
