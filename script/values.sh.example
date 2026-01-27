@@ -17,9 +17,13 @@
 PROJECT_ID=my-project
 SERVICE_NAME=ces-genesys-adapter
 SERVICE_ACCOUNT=ces-genesys-adapter@${PROJECT_ID}.iam.gserviceaccount.com
+CPU="1"
+MEMORY="1Gi"
 TIMEOUT=60m
+MIN_INSTANCES="1"
+MAX_INSTANCES="10"
 CONCURRENCY=5
-LOCATION=us-central1
+REGIONS=("us-central1")
 GENESYS_API_KEY_SECRET_PATH=projects/123456789012/secrets/my-api-key-path
 GENESYS_CLIENT_SECRET_PATH=projects/123456789012/secrets/my-genesys-client-secret
 # AUTH_TOKEN_SECRET_PATH="projects/123456789012/secrets/my-secret-token-path"
