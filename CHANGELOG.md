@@ -17,11 +17,7 @@
     -   **Change:** Added a specific `except` block for `websockets.exceptions.ConnectionClosedError` in `handle_connection`. Logs INFO if `disconnect` message was initiated by adapter, otherwise logs ERROR and attempts to clean up.
     -   **Impact:** The related logs now clearly distinguish between a planned session end (INFO) and an unexpected crash (ERROR).
 
-4.  **Simplified Session ID Generation (`ces_ws.py`):**
-    -   **Change:** Removed the option for external Session IDs; the adapter now strictly auto-generates UUIDs.
-    -   **Impact:** Guarantees session uniqueness and simplifies the initialization logic.
-
-5.  **Cleaned up `genesys_ws.py`:**
+4.  **Cleaned up `genesys_ws.py`:**
     -   Removed redundant variable initializations in `handle_text_message` for `open` type.
     -   Removed duplicate error log in `send_error_report`.
 ---
