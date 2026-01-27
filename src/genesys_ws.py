@@ -98,6 +98,8 @@ class GenesysWS:
                 self.agent_id = None
 
                 if not self.is_probe:
+                    self.initial_message = None
+                    self.session_id = None
                     if self.input_variables:
                         if "_deployment_id" in self.input_variables:
                             self.deployment_id = self.input_variables["_deployment_id"]
@@ -117,6 +119,10 @@ class GenesysWS:
                                 return
                         elif "_agent_id" in self.input_variables:
                             self.agent_id = self.input_variables["_agent_id"]
+                        if "_initial_message" in self.input_variables:
+                            self.initial_message = self.input_variables["_initial_message"]
+                        if "_session_id" in self.input_variables:
+                            self.session_id = self.input_variables["_session_id"]
 
                         self.ces_input_variables = {
                             k: v
@@ -132,7 +138,7 @@ class GenesysWS:
                         )
                         return
 
-                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id):
+                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id, self.session_id):
                         logger.error("CES connection failed, stopping setup", extra=self._get_log_extra(log_type="genesys_config_error"))
                         return # Disconnect is handled within ces_ws.connect
 
@@ -317,5 +323,9 @@ class GenesysWS:
             }))
         except Exception as e:
             logger.error("Failed to send error report to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_error_report_failed", data={
+                "errorType": errorType
+            }))
+
+            logger.error("Failed to send error report to Genesys", exc_info=True, extra=self._get_log_extra({
                 "errorType": errorType
             }))
