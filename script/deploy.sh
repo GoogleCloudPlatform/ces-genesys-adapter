@@ -16,20 +16,24 @@
 
 source $(dirname "$0")/values.sh
 
-gcloud run deploy $SERVICE_NAME \
-    --source="." \
-    --platform=managed \
-    --region=$LOCATION \
-    --cpu=1 \
-    --memory=1Gi \
-    --min-instances=1 \
-    --max-instances=10 \
-    --service-account=$SERVICE_ACCOUNT \
-    --allow-unauthenticated \
-    --project=$PROJECT_ID  \
-    --timeout=$TIMEOUT \
-    --concurrency=$CONCURRENCY \
-    --set-env-vars=AUTH_TOKEN_SECRET_PATH="$AUTH_TOKEN_SECRET_PATH",NUMBERS_COLLECTION_ID="$NUMBERS_COLLECTION_ID",LOG_UNREDACTED_DATA="$LOG_UNREDACTED_DATA" \
-    --set-secrets=GENESYS_API_KEY="$GENESYS_API_KEY_SECRET_PATH",GENESYS_CLIENT_SECRET="$GENESYS_CLIENT_SECRET_PATH" \
-    --allow-unauthenticated \
-    --startup-probe=httpGet.path=/health,httpGet.port=8080
+for REGION in "${REGIONS[@]}"
+do
+  echo "Deploying to region: $REGION"
+  gcloud run deploy $SERVICE_NAME \
+      --source="." \
+      --platform=managed \
+      --region=$REGION \
+      --cpu=$CPU \
+      --memory=$MEMORY \
+      --min-instances=$MIN_INSTANCES \
+      --max-instances=$MAX_INSTANCES \
+      --service-account=$SERVICE_ACCOUNT \
+      --allow-unauthenticated \
+      --project=$PROJECT_ID  \
+      --timeout=$TIMEOUT \
+      --concurrency=$CONCURRENCY \
+      --set-env-vars=AUTH_TOKEN_SECRET_PATH="$AUTH_TOKEN_SECRET_PATH",NUMBERS_COLLECTION_ID="$NUMBERS_COLLECTION_ID",LOG_UNREDACTED_DATA="$LOG_UNREDACTED_DATA" \
+      --set-secrets=GENESYS_API_KEY="$GENESYS_API_KEY_SECRET_PATH",GENESYS_CLIENT_SECRET="$GENESYS_CLIENT_SECRET_PATH" \
+      --allow-unauthenticated \
+      --startup-probe=httpGet.path=/health,httpGet.port=8080
+done

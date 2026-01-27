@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-01-27
+
+### Improvements & Fixes
+
+1.  **Refactored Audio Pacer for A2A Model usage (`ces_ws.py`):**
+    -   **Change:** Replaced simple queueing with an accumulation buffer that sends audio in 16KB chunks at minimum 200ms intervals.
+    -   **Impact:** Eliminates choppy audio and jitter experienced when using A2A Model by ensuring the Genesys AudioHook receives consistent, steady data packets.
+    -   **Ref:** Changed `MAX_GENESYS_CHUNK_SIZE` to 16000, added `QUEUE_GET_TIMEOUT`, implemented `send_buffer`, and revised sending loop.
+
+2.  **Fixed passing Variables from Genesys to CES (`ces_ws.py`):**
+    -   **Change:** Session variables are now sent in a separate `realtimeInput` message to CES, immediately after the `config` message and before the initial kickstart text message. This complies with the API's `oneof` constraint for `realtimeInput` fields.
+    -   **Impact:** Ensures session variables from Genesys are correctly passed to the virtual agent at the start of the session, aligning with the BidiRunSession API requirements.
+
+3.  **Improved ConnectionClosedError Handling (`genesys_ws.py`):**
+    -   **Change:** Added a specific `except` block for `websockets.exceptions.ConnectionClosedError` in `handle_connection`. Logs INFO if `disconnect` message was initiated by adapter, otherwise logs ERROR and attempts to clean up.
+    -   **Impact:** The related logs now clearly distinguish between a planned session end (INFO) and an unexpected crash (ERROR).
+
+4.  **Simplified Session ID Generation (`ces_ws.py`):**
+    -   **Change:** Removed the option for external Session IDs; the adapter now strictly auto-generates UUIDs.
+    -   **Impact:** Guarantees session uniqueness and simplifies the initialization logic.
+
+5.  **Cleaned up `genesys_ws.py`:**
+    -   Removed redundant variable initializations in `handle_text_message` for `open` type.
+    -   Removed duplicate error log in `send_error_report`.
+---
+
 ## 2026-01-15
 
 ### Optimization
