@@ -57,10 +57,17 @@ class GenesysWS:
                     await self.handle_text_message(message)
                 elif isinstance(message, bytes):
                     await self.handle_binary_message(message)
+        except websockets.exceptions.ConnectionClosedError as e:
+            if self.disconnect_initiated:
+                logger.info("Genesys WebSocket closed as expected after disconnect process started.", extra=self._get_log_extra(log_type="genesys_connection_closed"))
+            else:
+                logger.error("Genesys WebSocket closed unexpectedly mid-session.", extra=self._get_log_extra(log_type="genesys_error"), exc_info=True)
+                if self.ces_ws and self.ces_ws.is_connected():
+                    await self.send_disconnect("error", info=f"Genesys WS ConnectionClosedError: {e}")
         except Exception as e:
             logger.error("Error in Genesys WebSocket handler", exc_info=True, extra=self._get_log_extra(log_type="genesys_error"))
             if not self.disconnect_initiated:
-                await self.send_disconnect("error", f"WebSocket Error: {e}")
+                 await self.send_disconnect("error", info=f"WebSocket Error: {e}")
         finally:
             logger.info("Genesys connection loop finished. Cleaning up CES connection.", extra=self._get_log_extra(log_type="genesys_connection_cleanup"))
             if self.ces_ws:
