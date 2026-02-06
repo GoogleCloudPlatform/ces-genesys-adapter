@@ -13,13 +13,31 @@
 # limitations under the License.
 
 import os
-
+import re
 from dotenv import load_dotenv
+from google.cloud import secretmanager
 
 load_dotenv()
 
+def resolve_secret(secret_value: str) -> str:
+    if not secret_value:
+        return secret_value
+    if isinstance(secret_value, str) and secret_value.startswith("projects/"):
+        secret_path = secret_value
+        if "/versions/" not in secret_path:
+            secret_path = f"{secret_path}/versions/latest"
+        try:
+            client = secretmanager.SecretManagerServiceClient()
+            response = client.access_secret_version(name=secret_path)
+            return response.payload.data.decode("UTF-8").strip()
+        except Exception as e:
+            print(f"Error fetching secret from Secret Manager: {e}")
+            raise
+    return secret_value
+
 PORT = os.getenv("PORT", 8080)
-GENESYS_API_KEY = os.getenv("GENESYS_API_KEY")
+GENESYS_API_KEY = resolve_secret(os.getenv("GENESYS_API_KEY"))
 AUTH_TOKEN_SECRET_PATH = os.getenv("AUTH_TOKEN_SECRET_PATH")
-GENESYS_CLIENT_SECRET = os.getenv("GENESYS_CLIENT_SECRET")
+GENESYS_CLIENT_SECRET = resolve_secret(os.getenv("GENESYS_CLIENT_SECRET"))
 LOG_UNREDACTED_DATA = os.getenv("LOG_UNREDACTED_DATA")
+ 
