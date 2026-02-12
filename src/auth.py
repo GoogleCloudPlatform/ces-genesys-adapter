@@ -26,6 +26,7 @@ from google.auth.transport import requests as google_auth_requests
 from google.cloud import secretmanager
 
 from . import config
+from .redaction import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,10 @@ class Auth:
     def verify_request(self, request):
         headers = request.headers
         # API Key Verification
-        if headers.get("x-api-key") != config.GENESYS_API_KEY:
+        received_api_key = headers.get("x-api-key")
+        logger.info(f"Received x-api-key: '{redact_value(received_api_key)}'")
+        logger.info(f"Expected API key: '{redact_value(config.GENESYS_API_KEY)}'")
+        if received_api_key != config.GENESYS_API_KEY:
             logger.warning("API key verification failed.")
             return False
 
@@ -93,6 +97,7 @@ class Auth:
         if config.GENESYS_CLIENT_SECRET:
             try:
                 client_secret = config.GENESYS_CLIENT_SECRET.strip()
+                logger.info(f"Using GENESYS_CLIENT_SECRET: '{redact_value(client_secret)}'")
                 secret = base64.b64decode(client_secret)
 
                 signature_header = headers.get("Signature", "")
