@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import websockets
 
 from .ces_ws import CESWS
 from .redaction import redact, redact_value
