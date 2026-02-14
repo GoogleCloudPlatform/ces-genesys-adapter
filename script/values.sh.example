@@ -48,3 +48,4 @@ export GENESYS_CLIENT_SECRET_PATH="your-genesys-client-secret-name"
 # 2. Local JSON file (for development/testing)
 NUMBERS_CONFIG_FILE="number_mappings.json"
 LOG_UNREDACTED_DATA="false"
+DEBUG_WEBSOCKETS="false"
