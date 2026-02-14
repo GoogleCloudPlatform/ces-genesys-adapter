@@ -229,6 +229,7 @@ class CESWS:
     async def listen(self):
         while self.is_connected():
             try:
+                logger.debug("CES WS: Waiting for message...", extra=self._get_log_extra(log_type="ces_recv_wait"))
                 message = await self.websocket.recv()
                 data = json.loads(message)
 
@@ -271,7 +272,7 @@ class CESWS:
                 else:
                     logger.warning("Received unhandled message from CES", extra=self._get_log_extra(log_type="ces_recv_unhandled", data={"data": redact(data)}))
             except websockets.exceptions.ConnectionClosed as e:
-                logger.info("CES WS connection closed", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason}))
+                logger.warning("CES WS connection closed unexpectedly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
                 if not self.genesys_ws.disconnect_initiated:
                      await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
                 break

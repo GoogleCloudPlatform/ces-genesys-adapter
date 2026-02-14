@@ -53,6 +53,7 @@ class GenesysWS:
         self.ces_ws = CESWS(self)
 
         try:
+            logger.debug("Genesys WS: Waiting for message...", extra=self._get_log_extra(log_type="genesys_recv_wait"))
             async for message in self.websocket:
                 if isinstance(message, str):
                     await self.handle_text_message(message)
@@ -62,7 +63,7 @@ class GenesysWS:
             if self.disconnect_initiated:
                 logger.info("Genesys WebSocket closed as expected after disconnect process started.", extra=self._get_log_extra(log_type="genesys_connection_closed"))
             else:
-                logger.error("Genesys WebSocket closed unexpectedly mid-session.", extra=self._get_log_extra(log_type="genesys_error"), exc_info=True)
+                logger.error("Genesys WebSocket closed unexpectedly mid-session.", extra=self._get_log_extra(log_type="genesys_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}), exc_info=True)
                 if self.ces_ws and self.ces_ws.is_connected():
                     await self.send_disconnect("error", info=f"Genesys WS ConnectionClosedError: {e}")
         except Exception as e:
@@ -85,7 +86,11 @@ class GenesysWS:
             self.client_session_id = data.get("id")
             message_type = data.get("type")
 
+            if message_type == "close":
+                logger.info("Received 'close' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_closed"))
+
             if message_type == "open":
+                logger.info("Received 'open' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_open"))
                 parameters = data.get("parameters", {})
                 self.conversation_id = parameters.get("conversationId")
 
@@ -194,6 +199,7 @@ class GenesysWS:
                 await self.send_message(opened_message)
 
             elif message_type == "ping":
+                logger.info("Received 'ping' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_ping"))
                 pong_message = {
                     "type": "pong",
                     "version": "2",
@@ -209,6 +215,7 @@ class GenesysWS:
                 logger.info("Received playback-completed from Genesys", extra=self._get_log_extra(log_type="genesys_recv_playback_completed", data={"data": data}))
 
             elif message_type == "dtmf":
+                logger.info("Received 'dtmf' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_dtmf"))
                 digit = data.get("parameters", {}).get("digit")
                 if digit:
                     logger.info("Received DTMF from Genesys", extra=self._get_log_extra(log_type="genesys_recv_dtmf", data={"digit": redact_value(digit)}))
@@ -218,6 +225,7 @@ class GenesysWS:
                     logger.warning("Received DTMF message without digit", extra=self._get_log_extra(log_type="genesys_recv_dtmf_missing", data={"data": data}))
 
             elif message_type == "close":
+                pass
                 closed_message = {
                     "type": "closed",
                     "version": "2",

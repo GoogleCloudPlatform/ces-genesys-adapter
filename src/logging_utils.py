@@ -15,6 +15,8 @@
 import logging
 import json
 from datetime import datetime
+import re
+from . import config
 
 class JSONFormatter(logging.Formatter):
     """Custom JSON Formatter for Google Cloud Logging."""
@@ -29,6 +31,70 @@ class JSONFormatter(logging.Formatter):
             "pathname": record.pathname,
             "funcName": record.funcName,
         }
+
+        # Custom parsing for websockets library logs
+        if record.name.startswith("websockets"):
+            # Render the message with arguments first
+            rendered_msg = record.getMessage()
+            msg = rendered_msg # Use the rendered message for parsing
+            ws_trace = {}
+
+            frame_regex = re.compile(r"^([<>])\s+(TEXT|BINARY)\s+(.+?)\s+\[(\d+)\s+bytes\]$")
+            match = frame_regex.match(msg)
+
+            if match:
+                direction, frame_type, content, byte_length = match.groups()
+                ws_trace['direction'] = "inbound" if direction == "<" else "outbound"
+                ws_trace['frame_type'] = frame_type
+                ws_trace['byte_length'] = int(byte_length)
+
+                data_preview = content
+                if frame_type == "TEXT":
+                    data_preview = content.strip("'")
+
+                if data_preview:
+                    ws_trace['data_preview'] = data_preview[:50] + ("..." if len(data_preview) > 50 else "")
+                    if frame_type == "TEXT":
+                        try:
+                            ws_trace['data_json'] = json.loads(data_preview)
+                            ws_trace['data_json_status'] = "parsed"
+                        except json.JSONDecodeError:
+                            ws_trace['data_json_status'] = "decode_error"
+                    else:
+                        ws_trace['data_json_status'] = "not_attempted"
+            elif msg.startswith("< "):
+                ws_trace['direction'] = "inbound"
+                header_part = msg[2:]
+                if ":" in header_part:
+                    try:
+                        key, value = header_part.split(":", 1)
+                        ws_trace['header'] = key.strip()
+                        ws_trace['value'] = value.strip()
+                    except ValueError:
+                        ws_trace['info'] = header_part # Fallback
+                else:
+                    ws_trace['info'] = header_part
+            elif msg.startswith("> "):
+                ws_trace['direction'] = "outbound"
+                header_part = msg[2:]
+                if ":" in header_part:
+                    try:
+                        key, value = header_part.split(":", 1)
+                        ws_trace['header'] = key.strip()
+                        ws_trace['value'] = value.strip()
+                    except ValueError:
+                        ws_trace['info'] = header_part # Fallback
+                else:
+                    ws_trace['info'] = header_part
+            elif msg.startswith("= "):
+                ws_trace['direction'] = "state"
+                ws_trace['info'] = msg[2:]
+            elif msg.startswith("! "):
+                ws_trace['direction'] = "event"
+                ws_trace['info'] = msg[2:]
+
+            if ws_trace:
+                log_entry['websocket_trace'] = ws_trace
 
         # Add all dynamic fields from 'extra'
         reserved_attrs = {
@@ -56,3 +122,19 @@ def setup_logger():
     formatter = JSONFormatter()
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+    # Enable debug logging for websockets library if configured
+    if config.DEBUG_WEBSOCKETS:
+        handler.setLevel(logging.DEBUG) # Ensure handler processes DEBUG messages
+        ws_logger = logging.getLogger("websockets")
+        ws_logger.setLevel(logging.DEBUG)
+        ws_logger.addHandler(handler)
+        ws_logger.propagate = False # Prevent double logging to root
+
+        ws_protocol_logger = logging.getLogger("websockets.protocol")
+        ws_protocol_logger.setLevel(logging.DEBUG)
+        ws_protocol_logger.addHandler(handler)
+        ws_protocol_logger.propagate = False
+        logger.info("DEBUG logging enabled for 'websockets' library.", extra={"log_type": "config"})
+    else:
+        logging.getLogger("websockets").setLevel(logging.INFO)
