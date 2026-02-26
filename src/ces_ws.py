@@ -34,8 +34,9 @@ _BASE_WS_URL = (
 
 
 class CESWS:
-    def __init__(self, genesys_ws):
+    def __init__(self, genesys_ws, adapter_session_id):
         self.genesys_ws = genesys_ws
+        self.adapter_session_id = adapter_session_id
         self.websocket = None
         self.session_id = None
         self.deployment_id = None
@@ -47,13 +48,11 @@ class CESWS:
     def _get_log_extra(self, log_type: str, data: dict = None):
         extra = {
             "log_type": log_type,
+            "adapter_session_id": self.adapter_session_id,
+            "genesys_conv_id": self.genesys_ws.conversation_id,
             "ces_session_id": self.session_id,
         }
-        if self.genesys_ws:
-             # Pass a generic type to genesys_ws, the specific type is already in extra
-             base_extra = self.genesys_ws._get_log_extra(log_type="ces_related")
-             base_extra.update(extra) # Merge, CES log_type takes precedence
-             extra = base_extra
+        # The IDs are now added directly, no need to call genesys_ws._get_log_extra
         
         if data:
             extra.update(data)
@@ -63,7 +62,8 @@ class CESWS:
         return self.websocket and self.websocket.state == State.OPEN
 
     async def connect(self, agent_id, deployment_id=None, initial_message=None, session_id=None):
-        self.session_id = session_id if session_id else f"{agent_id}/sessions/{uuid.uuid4()}"
+        session_id_part = session_id if session_id else self.adapter_session_id
+        self.session_id = f"{agent_id}/sessions/{session_id_part}"
         self.deployment_id = deployment_id
         self.initial_message = initial_message
 
