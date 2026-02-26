@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 class GenesysWS:
-    def __init__(self, websocket):
+    def __init__(self, websocket, adapter_session_id):
         self.websocket = websocket
+        self.adapter_session_id = adapter_session_id
         self.ces_ws = None
         self.last_server_sequence_number = 0
         self.last_client_sequence_number = 0
@@ -40,17 +41,19 @@ class GenesysWS:
     def _get_log_extra(self, log_type: str, data: dict = None):
         extra = {
             "log_type": log_type,
+            "adapter_session_id": self.adapter_session_id,
             "genesys_session_id": self.client_session_id,
             "genesys_conv_id": self.conversation_id,
             "server_seq": self.last_server_sequence_number,
-            "client_seq": self.last_client_sequence_number
+            "client_seq": self.last_client_sequence_number,
+            "ces_session_id": self.ces_ws.session_id if self.ces_ws and self.ces_ws.session_id else None
         }
         if data:
             extra.update(data)
         return extra
 
     async def handle_connection(self):
-        self.ces_ws = CESWS(self)
+        self.ces_ws = CESWS(self, self.adapter_session_id)
 
         try:
             logger.debug("Genesys WS: Waiting for message...", extra=self._get_log_extra(log_type="genesys_recv_wait"))
@@ -126,7 +129,11 @@ class GenesysWS:
                         elif "_agent_id" in self.input_variables:
                             self.agent_id = self.input_variables["_agent_id"]
                         if "_initial_message" in self.input_variables:
-                            self.initial_message = self.input_variables["_initial_message"]
+                            try:
+                              self.initial_message = json.loads(self.input_variables["_initial_message"])
+                            except json.JSONDecodeError:
+                                logger.warning(f"Failed to JSON decode _initial_message: {self.input_variables['_initial_message']}", exc_info=True, extra=self._get_log_extra(log_type="genesys_config_warning"))
+                                self.initial_message = self.input_variables["_initial_message"] # Fallback to using the raw string
                         if "_session_id" in self.input_variables:
                             self.session_id = self.input_variables["_session_id"]
 
@@ -135,6 +142,7 @@ class GenesysWS:
                             for k, v in self.input_variables.items()
                             if not k.startswith("_")
                         }
+                        self.ces_input_variables["adapterSessionId"] = self.adapter_session_id
 
                     if not self.agent_id:
                         logger.error("Missing _deployment_id or _agent_id", extra=self._get_log_extra(log_type="genesys_config_error", data={"input_variables": self.input_variables}))
@@ -144,7 +152,7 @@ class GenesysWS:
                         )
                         return
 
-                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id, self.session_id):
+                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id, self.initial_message, self.session_id):
                         logger.error("CES connection failed, stopping setup", extra=self._get_log_extra(log_type="genesys_config_error"))
                         return # Disconnect is handled within ces_ws.connect
 

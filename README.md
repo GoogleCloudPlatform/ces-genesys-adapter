@@ -2,6 +2,8 @@
 
 This repository contains a Python-based adapter that bridges Genesys Cloud AudioHook WebSocket connections with Google's Conversational Agents (Generative) (using the BidiRunSession API). It allows you to integrate your Genesys Cloud contact center with powerful, real-time AI agents.
 
+For a detailed guide on deploying this adapter in a high-availability, multi-region configuration on Google Cloud, please see the [Reference Implementation Guide](docs/reference_implementation/INCUBATION_REFERENCE_IMPLEMENTATION.md).
+
 ## Background
 
 ### Core Technologies
@@ -109,61 +111,6 @@ Open `script/values.sh` in a text editor and fill in the required values. Key va
 
 You can set these up in Architect (on the Genesys console) when setting up the integration in your flow. Any other variables in `inputVariables` (not starting with an underscore) will be forwarded to CES.
 
-### Passing Data from CES to Genesys
-
-At the end of a conversation, your conversational agent can pass data back to Genesys Cloud by using `outputVariables`. The adapter facilitates this by inspecting the `endSession` message from CES.
-
-To send data back to Genesys, your agent should terminate the conversation and include a `params` object within the `metadata` of the `endSession` message. The adapter will automatically convert this `params` object into `outputVariables` that Genesys can use.
-
-**Example `endSession` message from CES:**
-
-If your agent ends the session with the following `endSession` message:
-```json
-{
-  "endSession": {
-    "metadata": {
-      "params": {
-        "disposition": "Resolved",
-        "survey_offered": "true",
-        "customer_sentiment": "positive"
-      }
-    }
-  }
-}
-```
-
-**Resulting `outputVariables` in Genesys:**
-
-The adapter will process this and include the following `outputVariables` in the `disconnect` message sent to Genesys:
-```json
-{
-  "outputVariables": {
-    "disposition": "Resolved",
-    "survey_offered": "true",
-    "customer_sentiment": "positive"
-  }
-}
-```
-
-This data can then be used in your Genesys Architect flow for routing decisions, data lookup, or reporting.
-
-### Changelog
-
-Recent updates and improvements:
-
-1.  **Barge-in Handling**: Added support for `InterruptionSignal` from CES to handle customer barge-ins, clearing the outbound audio queue. [renibot]
-2.  **DTMF Support**: Implemented handling of DTMF messages from Genesys, forwarding digits to CES. [renibot]
-3.  **Improved Audio Streaming**: Adjusted audio format and handling to better align with Genesys Audio Connector requirements. [renibot]
-4.  **Audio Chunking**: Introduced audio chunking (32KB every 200ms) to prevent audio frame issues and improve stability with Genesys. [renibot]
-5.  **Structured JSON Logging**: Implemented `logging_utils.py` for structured Cloud Logging, enriching logs with session IDs and other context. [renibot]
-6.  **Robust Error Handling**: Added comprehensive `try...except` blocks in WebSocket send/receive loops and async task management in both `genesys_ws.py` and `ces_ws.py` to catch errors and trigger graceful disconnects. [renibot]
-7.  **Graceful Shutdown**: Enhanced the `send_disconnect` logic to ensure the audio output queue is fully drained before closing WebSocket connections. [renibot]
-8.  **Prevent Duplicate Disconnects**: Introduced a `disconnect_initiated` flag in `GenesysWS` to prevent multiple disconnect messages from being sent during a single closure event. [renibot]
-9.  **endSession Metadata Passthrough**: Ensured that the `params` from the CES `endSession` message are correctly passed as `outputVariables` in the disconnect message to Genesys. [renibot]
-10. **AudioHook Protocol Fixes**: Addressed issues resulting in AUDIOHOOK-0004 and AUDIOHOOK-0009 errors in the end of session handling. [renibot]
-11. **Dynamic Initial Message**: Added support for `_initial_message` in input variables, allowing the custom configuration of the conversation kickstart message (defaulting to "Hello"). [aiestaran]
-12. **Custom Session ID**: Added support for `_session_id` in input variables, enabling the caller to provide a custom session ID for the CES conversation. [aiestaran]
-
 ### Step 2: Run the Deployment Script
 
 Once your `values.sh` file is configured, run the deploy script:
@@ -222,3 +169,72 @@ You will need a second Cloud Shell terminal to run the adapter itself.
     ```bash
     bash script/run-dev.sh
     ```
+
+### Passing Data from CES to Genesys
+
+At the end of a conversation, your conversational agent can pass data back to Genesys Cloud by using `outputVariables`. The adapter facilitates this by inspecting the `endSession` message from CES.
+
+To send data back to Genesys, your agent should terminate the conversation and include a `params` object within the `metadata` of the `endSession` message. The adapter will automatically convert this `params` object into `outputVariables` that Genesys can use.
+
+**Example `endSession` message from CES:**
+
+If your agent ends the session with the following `endSession` message:
+```json
+{
+  "endSession": {
+    "metadata": {
+      "params": {
+        "disposition": "Resolved",
+        "survey_offered": "true",
+        "customer_sentiment": "positive"
+      }
+    }
+  }
+}
+```
+
+**Resulting `outputVariables` in Genesys:**
+
+The adapter will process this and include the following `outputVariables` in the `disconnect` message sent to Genesys:
+```json
+{
+  "outputVariables": {
+    "disposition": "Resolved",
+    "survey_offered": "true",
+    "customer_sentiment": "positive"
+  }
+}
+```
+
+This data can then be used in your Genesys Architect flow for routing decisions, data lookup, or reporting.
+
+---
+
+## Key Features
+
+*   **Barge-in Handling**: Added support for `InterruptionSignal` from CES to handle customer barge-ins, clearing the outbound audio queue.
+*   **DTMF Support**: Implemented handling of DTMF messages from Genesys, forwarding digits to CES.
+*   **Structured JSON Logging**: Implemented `logging_utils.py` for structured Cloud Logging, enriching logs with session IDs and other context.
+*   **Dynamic Initial Message**: Added support for `_initial_message` in input variables, allowing the custom configuration of the conversation kickstart message (defaulting to "Hello").
+*   **Custom Session ID**: Added support for `_session_id` in input variables, enabling the caller to provide a custom session ID for the CES conversation.
+
+### Hybrid Secret Management
+
+The adapter supports flexible ways to load secrets like the `GENESYS_CLIENT_SECRET`:
+
+1.  **Cloud Run Secret Injection (Recommended):** You can configure Cloud Run to mount the secret as a file in the container. Provide just the secret name (e.g., `your-genesys-client-secret-name`) in the `GENESYS_CLIENT_SECRET_PATH` environment variable.
+2.  **Runtime Fetch from Secret Manager:** You can provide the full secret version resource path (e.g., `projects/<PROJECT_ID>/secrets/<SECRET_ID>/versions/latest`). The adapter will fetch the secret at runtime.
+
+The `src/config.py` module automatically detects the path type and loads the secret accordingly. This is configured via the `GENESYS_CLIENT_SECRET_PATH` variable in `script/values.sh`.
+
+### Enhanced WebSocket Debug Logging
+
+To aid in troubleshooting, the adapter includes detailed WebSocket debug logging:
+
+*   **Enable/Disable:** Controlled by the `DEBUG_WEBSOCKETS` environment variable in `script/values.sh` (set to `true` to enable).
+*   **Structured JSON:** Logs are output as JSON, suitable for Cloud Logging.
+*   **`websocket_trace` Field:** WebSocket-specific information is nested under the `websocket_trace` key.
+*   **Frame Details:** Includes `direction`, `frame_type`, `byte_length`, and `data_preview` for TEXT and BINARY frames.
+*   **JSON Content Parsing:** For TEXT frames, the logger attempts to parse the content as JSON.
+    *   `data_json`: If parsing is successful, this field contains the parsed object.
+    *   `data_json_status`: Indicates the parsing result: `"parsed"`, `"decode_error"`, or `"not_attempted"`.

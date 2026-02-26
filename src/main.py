@@ -16,6 +16,7 @@ import asyncio
 import http
 import logging
 import sys
+import uuid
 
 import websockets
 
@@ -56,8 +57,9 @@ async def handler(websocket):
     """
     This function is called for each incoming WebSocket connection.
     """
-    logger.info("New connection", extra={"log_type": "connection_start", "remote_address": websocket.remote_address})
-    genesys_ws = GenesysWS(websocket)
+    adapter_session_id = str(uuid.uuid4())
+    logger.info("New connection", extra={"log_type": "connection_start", "remote_address": websocket.remote_address, "adapter_session_id": adapter_session_id})
+    genesys_ws = GenesysWS(websocket, adapter_session_id)
     await genesys_ws.handle_connection()
 
 
