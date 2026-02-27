@@ -10,62 +10,62 @@
 
 # Table of Contents
 
-[**1\. Solution Overview**](#1.-solution-overview)
+[**1. Solution Overview**](#1-solution-overview)
 
-[**2\. Solution Architecture**](#2.-solution-architecture)
+[**2. Solution Architecture**](#2-solution-architecture)
 
-[2.1. High-level Components and Data Flow](#2.1.-high-level-components-and-data-flow)
+[2.1. High-level Components and Data Flow](#21-high-level-components-and-data-flow)
 
-[2.2. High-level Architecture Diagram](#2.2.-high-level-architecture-diagram)
+[2.2. High-level Architecture Diagram](#22-high-level-architecture-diagram)
 
-[**3\. IAM (Identity and Access Management)**](#3.-iam-\(identity-and-access-management\))
+[**3. IAM (Identity and Access Management)**](#3-iam-identity-and-access-management)
 
-[**4\. Reference Implementation Guide**](#4.-reference-implementation-guide)
+[**4. Reference Implementation Guide**](#4-reference-implementation-guide)
 
-[4.1. Configuring Genesys Cloud](#4.1.-configuring-genesys-cloud)
+[4.1. Configuring Genesys Cloud](#41-configuring-genesys-cloud)
 
-[4.1.1. Configure the Genesys Audio Connector integration](#4.1.1.-configure-the-genesys-audio-connector-integration)
+[4.1.1. Configure the Genesys Audio Connector integration](#411-configure-the-genesys-audio-connector-integration)
 
-[4.1.2. Configuring the Audio Connector in Architect](#4.1.2.-configuring-the-audio-connector-in-architect)
+[4.1.2. Configuring the Audio Connector in Architect](#412-configuring-the-audio-connector-in-architect)
 
-[4.1.3. Troubleshooting the Genesys Configuration](#4.1.3.-troubleshooting-the-genesys-configuration)
+[4.1.3. Troubleshooting the Genesys Configuration](#413-troubleshooting-the-genesys-configuration)
 
-[4.1.3.1. Genesys Cloud Operational Console](#4.1.3.1.-genesys-cloud-operational-console)
+[4.1.3.1. Genesys Cloud Operational Console](#4131-genesys-cloud-operational-console)
 
-[4.1.3.2. Genesys Cloud Flow Execution History](#4.1.3.2.-genesys-cloud-flow-execution-history)
+[4.1.3.2. Genesys Cloud Flow Execution History](#4132-genesys-cloud-flow-execution-history)
 
-[4.2. Deploying GCP components](#4.2.-deploying-gcp-components)
+[4.2. Deploying GCP components](#42-deploying-gcp-components)
 
-[4.2.1. Create the service accounts](#4.2.1.-create-the-service-accounts)
+[4.2.1. Create the service accounts](#421-create-the-service-accounts)
 
-[4.2.2. Create and deploy the Cloud Run application](#4.2.2.-create-and-deploy-the-cloud-run-application)
+[4.2.2. Create and deploy the Cloud Run application](#422-create-and-deploy-the-cloud-run-application)
 
-[4.2.3. Set up Cloud DNS](#4.2.3.-set-up-cloud-dns)
+[4.2.3. Set up Cloud DNS](#423-set-up-cloud-dns)
 
-[4.2.4. Set up External Application Load Balancer](#4.2.4.-set-up-external-application-load-balancer)
+[4.2.4. Set up External Application Load Balancer](#424-set-up-external-application-load-balancer)
 
-[4.2.5. Configure the backend service](#4.2.5.-configure-the-backend-service)
+[4.2.5. Configure the backend service](#425-configure-the-backend-service)
 
-[4.2.6. Set up Frontend & SSL](#4.2.6.-set-up-frontend-&-ssl)
+[4.2.6. Set up Frontend & SSL](#426-set-up-frontend--ssl)
 
-[4.2.7. Troubleshooting GCP components](#4.2.7.-troubleshooting-gcp-components)
+[4.2.7. Troubleshooting GCP components](#427-troubleshooting-gcp-components)
 
-[4.2.7.1. CES Genesys Adapter Structured Logging](#4.2.7.1.-ces-genesys-adapter-structured-logging)
+[4.2.7.1. CES Genesys Adapter Structured Logging](#4271-ces-genesys-adapter-structured-logging)
 
-[4.2.7.2. Specific GCP components and General Cloud Logging](#4.2.7.2.-specific-gcp-components-and-general-cloud-logging)
+[4.2.7.2. Specific GCP components and General Cloud Logging](#4272-specific-gcp-components-and-general-cloud-logging)
 
-[4.3. CX Agent Studio](#4.3.-cx-agent-studio)
+[4.3. CX Agent Studio](#43-cx-agent-studio)
 
-[4.3.1. Features supported by the adapter](#4.3.1.-features-supported-by-the-adapter)
+[4.3.1. Features supported by the adapter](#431-features-supported-by-the-adapter)
 
-[4.3.2. Create a deployment for your agent](#4.3.2.-create-a-deployment-for-your-agent)
+[4.3.2. Create a deployment for your agent](#432-create-a-deployment-for-your-agent)
 
-[4.3.3. Mapping input variables from Genesys](#4.3.3.-mapping-input-variables-from-genesys)
+[4.3.3. Mapping input variables from Genesys](#433-mapping-input-variables-from-genesys)
 
-[4.3.4. Generating metadata that maps to output variables in Genesys](#4.3.4.-generating-metadata-that-maps-to-output-variables-in-genesys)
+[4.3.4. Generating metadata that maps to output variables in Genesys](#434-generating-metadata-that-maps-to-output-variables-in-genesys)
 
-[4.3.5. Troubleshooting CXAS sessions](#4.3.5.-troubleshooting-cxas-sessions)
-# 1\. Solution Overview {#1.-solution-overview}
+[4.3.5. Troubleshooting CXAS sessions](#435-troubleshooting-cxas-sessions)
+# 1. Solution Overview
 
 This solution provides a Python-based adapter to bridge Genesys Cloud AudioHook WebSockets with Google Cloud's CX Agent Studio (“CXAS”), specifically utilizing the `BidiRunSession` API for real-time, bidirectional audio streaming and conversation management. This enables seamless integration of sophisticated virtual agents into a Genesys Cloud voice flow.
 
@@ -73,9 +73,9 @@ The adapter handles the WebSocket signaling, audio pacing (currently configured 
 
 This reference implementation is based on the open-source code available on GitHub at [GoogleCloudPlatform/ces-genesys-adapter](https://github.com/GoogleCloudPlatform/ces-genesys-adapter). The code is published under the Apache License 2.0.
 
-# 2\. Solution Architecture {#2.-solution-architecture}
+# 2. Solution Architecture
 
-## 2.1. High-level Components and Data Flow {#2.1.-high-level-components-and-data-flow}
+## 2.1. High-level Components and Data Flow
 
 * **Genesys Cloud**: A suite of cloud services for enterprise-grade contact center management. It handles customer communications across voice, chat, email, and other channels. Developer center available [here](https://developer.genesys.cloud/).  
 * **Genesys Audio Connector**: Initiates the AudioHook WebSocket connection to the adapter when a call enters the configured flow. Overview available [here](http://help.mypurecloud.com/articles/audio-connector-overview/).  
@@ -98,14 +98,14 @@ This reference implementation is based on the open-source code available on GitH
 * **Google Cloud CX Agent Studio**: Hosts the virtual agent, processes the audio stream, and generates responses. Documentation available [here](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps).  
 * **Google Secret Manager**: Securely stores Genesys API keys and client secrets used for signature verification. Documentation available [here](https://docs.cloud.google.com/secret-manager/docs).
 
-## 2.2. High-level Architecture Diagram {#2.2.-high-level-architecture-diagram}
+## 2.2. High-level Architecture Diagram
 
 The reference implementation assumes a multi-region configuration for high-availability and redundancy.  
 ![High-level Architecture Diagram](reference_architecture.png)
 
 # 
 
-# 3\. IAM (Identity and Access Management) {#3.-iam-(identity-and-access-management)}
+# 3. IAM (Identity and Access Management)
 
 IAM roles utilized for each step are documented below, it is important to ensure secure and controlled access of these call recording files:
 
@@ -115,7 +115,7 @@ IAM roles utilized for each step are documented below, it is important to ensure
 2. Services Access Policy:  
    * The Cloud Run service resource must allow unauthenticated ingress (`roles/run.invoker` granted to `allUsers`) to accept traffic from the Global External Load Balancer.
 
-# 4\. Reference Implementation Guide {#4.-reference-implementation-guide}
+# 4. Reference Implementation Guide
 
 This section will include the major steps and code examples used to deploy this reference implementation in Google Cloud. Prior to following the reference implementation, confirm that you meet the following prerequisites.
 
@@ -128,11 +128,11 @@ Prerequisites:
 5. A deployed CX Agent Studio agent  
 6. The following APIs enabled in your GCP Project: [Cloud Asset Inventory](https://docs.cloud.google.com/asset-inventory/docs/reference/rest), [Compute Engine](https://docs.cloud.google.com/compute/docs/reference/rest/v1), [Cloud Run](https://docs.cloud.google.com/run/docs/reference/rest), [Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/reference/rest), [Cloud Build](https://docs.cloud.google.com/build/docs/api/reference/rest), [Secret Manager](https://docs.cloud.google.com/secret-manager/docs/reference/rest), [Cloud Logging](https://docs.cloud.google.com/logging/docs/reference/v2/rest), [Gemini Enterprise for Customer Experience](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/reference/rest/v1-overview), [Cloud DNS](https://docs.cloud.google.com/dns/docs/reference/rest/v1)
 
-## 4.1. Configuring Genesys Cloud {#4.1.-configuring-genesys-cloud}
+## 4.1. Configuring Genesys Cloud
 
 This section describes the necessary steps for configuring the Genesys Cloud environment for this reference implementation, however it is not an exhaustive list of configurations for implementing Genesys Cloud as a contact center solution. 
 
-### 4.1.1. Configure the Genesys Audio Connector integration {#4.1.1.-configure-the-genesys-audio-connector-integration}
+### 4.1.1. Configure the Genesys Audio Connector integration
 
 This section describes the necessary steps to configure the Audio Connector integration. In order to add the Genesys Audio Connector from AppFoundry ([here](https://appfoundry.mypurecloud.com/filter/genesyscloud/listing/a56d4a1a-241b-4fd7-9342-ccd9db6f837a)), you will need to work with your Genesys account team. 
 
@@ -156,7 +156,7 @@ Once the integration is available to your account, follow the steps below to con
 
 Once the **Audio Connector** integration is configured, prior to advancing to section 4.1.2, you will need a DID Number available for assignment to the Flow created in the next step.
 
-### 4.1.2. Configuring the Audio Connector in Architect {#4.1.2.-configuring-the-audio-connector-in-architect}
+### 4.1.2. Configuring the Audio Connector in Architect
 
 This section describes the minimum requirements to configure the [Audio Connector](http://help.mypurecloud.com/articles/audio-connector-overview/) in a Genesys flow for use with the [CES Genesys Adapter](https://github.com/GoogleCloudPlatform/ces-genesys-adapter) deployed in [Cloud Run](https://docs.cloud.google.com/run/docs).
 
@@ -187,23 +187,23 @@ Follow the steps below to configure the Audio Connector:
 | `_session_id` | As an example, write the Genesys conversation ID to this variable in the flow. | (Optional) Use a custom session ID for the CXAS agent conversation. If left `null` the adapter will use its session id (`adapter_session_id`). |  |
 | `_initial_message` | Insert a phrase to insert at session creation to kickstart your agent’s first turn. | (Optional) The default adapter kickstart message is “Hello”, overwrite it with this input variable. |  |
 
-### 4.1.3. Troubleshooting the Genesys Configuration {#4.1.3.-troubleshooting-the-genesys-configuration}
+### 4.1.3. Troubleshooting the Genesys Configuration
 
 This section outlines the troubleshooting tools available in Genesys Cloud for the Audio Connector integration and flow configuration.
 
-#### *4.1.3.1. Genesys Cloud Operational Console* {#4.1.3.1.-genesys-cloud-operational-console}
+#### *4.1.3.1. Genesys Cloud Operational Console*
 
 In order to troubleshoot errors with the integration related to the Audio Connector, you can use the Genesys Cloud **Operational Console** tool. The console displays error messages related to the AudioHook protocol. See the documentation for this tool [here](https://help.genesys.cloud/articles/troubleshoot-using-the-genesys-cloud-operational-console/).
 
-#### *4.1.3.2. Genesys Cloud Flow Execution History* {#4.1.3.2.-genesys-cloud-flow-execution-history}
+#### *4.1.3.2. Genesys Cloud Flow Execution History*
 
 In order to troubleshoot errors with the integration, which offers drill down into where in the flow the error occurred, you can use the **Flow execution history** tool. The execution history will pinpoint where in the flow an error occurred. See the documentation for this tool [here](https://help.genesys.cloud/articles/flow-execution-history/).
 
-## 4.2. Deploying GCP components {#4.2.-deploying-gcp-components}
+## 4.2. Deploying GCP components
 
 This section describes the deployment of required GCP components used in this reference implementation. If your enterprise’s requirements vary from the reference implementation, you will need to consider the necessary changes to the steps in the section accordingly.
 
-### 4.2.1. Create the service accounts {#4.2.1.-create-the-service-accounts}
+### 4.2.1. Create the service accounts
 
 The Cloud Run service needs a [Google Cloud service account](https://docs.cloud.google.com/iam/docs/service-account-overview) to run as, which grants it permission to invoke the Gemini Enterprise for Customer Experience API and access secrets stored in Secret Manager. 
 
@@ -245,7 +245,7 @@ gcloud secrets add-iam-policy-binding [CLIENT_SECRET_NAME] \
 
 At the end of this section, you will have a service account created with the appropriate permissions configured. You are responsible for ensuring the token in **Secret Manager** is valid and refreshed periodically. The adapter will simply read and use whatever token is stored there.
 
-### 4.2.2. Create and deploy the Cloud Run application {#4.2.2.-create-and-deploy-the-cloud-run-application}
+### 4.2.2. Create and deploy the Cloud Run application
 
 The Cloud Run application uses open source software published to Google Cloud’s GitHub [here](https://github.com/GoogleCloudPlatform/ces-genesys-adapter). Once you have cloned the open source repository locally, follow the next steps to deploy the software to Cloud Run:
 
@@ -326,7 +326,7 @@ bash script/deploy.sh
 
 At the end of this section, you should have your Cloud Run application deployed in two regions (`us-central1` and `us-east4`) with the correct service account, environment variables and secrets mounted.
 
-### 4.2.3. Set up Cloud DNS {#4.2.3.-set-up-cloud-dns}
+### 4.2.3. Set up Cloud DNS
 
 This reference implementation utilizes a custom domain to provide a stable, global entry point for Genesys Cloud. This decouples the Genesys configuration from specific regional Cloud Run URLs.
 
@@ -379,7 +379,7 @@ gcloud dns record-sets transaction execute --zone="[ZONE_NAME]"
 
 **Note:** Replace `[SUBDOMAIN]` with your chosen prefix (e.g., `audiohook`).
 
-### 4.2.4. Set up External Application Load Balancer {#4.2.4.-set-up-external-application-load-balancer}
+### 4.2.4. Set up External Application Load Balancer
 
 The Load Balancer distributes incoming WebSocket traffic across the deployed Cloud Run regions using [Serverless Network Endpoint Groups (NEGs)](https://docs.cloud.google.com/load-balancing/docs/negs/serverless-neg-concepts).
 
@@ -401,7 +401,7 @@ gcloud compute network-endpoint-groups create [NEG_NAME_REGION2] \
 
 **Note:** Replace `[NEG_NAME_REGION1]` and `[NEG_NAME_REGION2]` with descriptive names (e.g., `neg-central1`, `neg-east4`), `[REGION1/2]` with your GCP regions, and `[SERVICE_NAME]` with your Cloud Run service name (e.g., `ces-genesys-adapter`).
 
-### 4.2.5. Configure the backend service {#4.2.5.-configure-the-backend-service}
+### 4.2.5. Configure the backend service
 
 The Backend Service defines how the Load Balancer distributes traffic to the NEGs created in the previous step.
 
@@ -453,7 +453,7 @@ gcloud compute backend-services update [BACKEND_SERVICE_NAME] \
     --logging-sample-rate=1.0
 ```
 
-### 4.2.6. Set up Frontend & SSL {#4.2.6.-set-up-frontend-&-ssl}
+### 4.2.6. Set up Frontend & SSL
 
 This final step configures the public-facing components: the URL map, the SSL certificate, and the forwarding rule that binds the IP address to your service.
 
@@ -541,11 +541,11 @@ gcloud run services add-iam-policy-binding [SERVICE_NAME] \
     --role="roles/run.invoker"
 ```
 
-### 4.2.7. Troubleshooting GCP components {#4.2.7.-troubleshooting-gcp-components}
+### 4.2.7. Troubleshooting GCP components
 
 This section describes the logs available for troubleshooting the GCP components in the reference implementation.
 
-#### *4.2.7.1. CES Genesys Adapter Structured Logging* {#4.2.7.1.-ces-genesys-adapter-structured-logging}
+#### *4.2.7.1. CES Genesys Adapter Structured Logging*
 
 The adapter has been [updated](https://github.com/GoogleCloudPlatform/ces-genesys-adapter/blob/main/CHANGELOG.md) to generate structured JSON logs with Cloud Logging. In the structured logs, a field has been created `log_type` to help with identifying where things are happening and to give a specific key for querying logs.
 
@@ -623,7 +623,7 @@ If you have enabled websocket debugging with the `DEBUG_WEBSOCKETS` environment 
   * `"decode_error"`: A `json.JSONDecodeError` occurred, meaning the content is not valid JSON. This can happen with non-JSON text messages or truncated JSON.  
   * `"not_attempted"`: JSON parsing was not attempted (e.g., for `BINARY` frames).
 
-#### *4.2.7.2. Specific GCP components and General Cloud Logging* {#4.2.7.2.-specific-gcp-components-and-general-cloud-logging}
+#### *4.2.7.2. Specific GCP components and General Cloud Logging*
 
 To help you troubleshoot the specific components in your Genesys Adapter architecture using Cloud Logging and other GCP tools, here are the direct links to the relevant documentation.
 
@@ -644,11 +644,11 @@ To help you troubleshoot the specific components in your Genesys Adapter archite
 
 **Important**: If you are configuring Google [Cloud Armor](https://docs.cloud.google.com/armor/docs) in your environment, you will need to get the specific IP addresses that Genesys Audio Connector (`"service": "audio-connector"`) uses for your Genesys environment(s). These are unique by region. Visit the Genesys Help Center article [here](https://help.genesys.cloud/faqs/how-can-i-obtain-the-ip-address-range-for-my-region-where-audio-connector-protocol-requests-could-originate-from-so-that-i-can-add-it-to-my-allowlist/) and follow the instructions to retrieve the IPs that will need to be allowlisted in Cloud Armor. 
 
-## 4.3. CX Agent Studio {#4.3.-cx-agent-studio}
+## 4.3. CX Agent Studio
 
 This section describes the configurations in [CX Agent Studio](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps) (CXAS) that are relevant to the reference implementation. 
 
-### 4.3.1. Features supported by the adapter {#4.3.1.-features-supported-by-the-adapter}
+### 4.3.1. Features supported by the adapter
 
 The adapter code supports various features of CXAS as it relates to the end-user experience, but does not support all. The table below contains the adapter’s supported features:
 
@@ -663,7 +663,7 @@ The adapter code supports various features of CXAS as it relates to the end-user
 
 **Note:** that the features in the list above are specific to [SessionInput](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/reference/rpc/google.cloud.ces.v1#sessioninput) and [SessionOutput](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/reference/rpc/google.cloud.ces.v1#sessionoutput) methods of the CES API. The [Ambient sounds](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/agent#agent-application-settings) feature, while not explicitly specified in the API, does not work well with the adapter’s reference implementation due to audio frame limits with the AudioHook protocol.
 
-### 4.3.2. Create a deployment for your agent {#4.3.2.-create-a-deployment-for-your-agent}
+### 4.3.2. Create a deployment for your agent
 
 CX Agent Studio offers [deployment channels](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/deploy) for your agent. In the reference implementation, the deployment channel used is [API connection](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/deploy/api-access). The deployment ID that is generated by creating a deployment channel is used when configuring the `_deployment_id` input variable in the audio connector settings of the Genesys flow builder.
 
@@ -682,7 +682,7 @@ To create the deployment channel:
 
 The complete path needs to be saved as the value for the `_deployment_id` input variable configured in section 4.1.2.6.c. Note that you do not need to create a new deployment channel each time you update your agent, instead you can simply create a new version under your deployment ID configured by repeating step 5b above and selecting **Save**. This will ensure you can continue to use the deployment ID value you’ve configured in the Genesys flow.
 
-### 4.3.3. Mapping input variables from Genesys {#4.3.3.-mapping-input-variables-from-genesys}
+### 4.3.3. Mapping input variables from Genesys
 
 In section 4.1.2.6.c, you configured in the Audio Connector a set of optional input variables to pass into the CXAS agent at runtime. This section describes how to configure the CXAS agent to consume the variables being passed.
 
@@ -696,7 +696,7 @@ In the reference implementation, the audio connector input variables used are:
 | dnis | FlowData: `Call.CalledAddressOriginal` | dnis | Text |
 | genesysId | FlowData: `Call.ConversationId` | genesysId | Text |
 
-### 4.3.4. Generating metadata that maps to output variables in Genesys {#4.3.4.-generating-metadata-that-maps-to-output-variables-in-genesys}
+### 4.3.4. Generating metadata that maps to output variables in Genesys
 
 In section 4.1.2.6.d, you configured in the Audio Connector a set of expected output variables to be returned to the flow when the CXAS agent calls the `end_session` [system tool](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/tool/system). 
 
@@ -806,7 +806,7 @@ def construct_end_session_args(
 
 **Note:** In order for the `params` to be included in the `end_session` tool, the instructions to call `end_session` must include the argument `session_escalated=true`.
 
-### 4.3.5. Troubleshooting CXAS sessions {#4.3.5.-troubleshooting-cxas-sessions}
+### 4.3.5. Troubleshooting CXAS sessions
 
 In order to troubleshoot CXAS sessions with the integration, it is recommended to enable the following:
 
