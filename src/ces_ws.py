@@ -1,11 +1,11 @@
 # Copyright 2025 Google LLC
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -190,6 +190,24 @@ class CESWS:
         else:
             logger.warning("Cannot send DTMF, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_dtmf_error", data={"digit": redact_value(digit)}))
 
+    async def send_genesys_disconnect_event(self):
+        logger.info("Attempting to send 'genesys-call-disconnect' event to CES", extra=self._get_log_extra(log_type="ces_send_event"))
+        event_message = {
+            "realtimeInput": {
+                "event": {
+                    "event": "wrapup"
+                }
+            }
+        }
+        if self.is_connected():
+            try:
+                await self.websocket.send(json.dumps(event_message))
+                logger.info("Sent 'genesys-call-disconnect' event to CES", extra=self._get_log_extra(log_type="ces_send_event_success", data=event_message))
+            except Exception as e:
+                logger.error("Error sending 'genesys-call-disconnect' event to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_event_error"))
+        else:
+            logger.warning("Cannot send event, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_event_skip"))
+
     async def stop_audio(self):
         logger.info("Stopping audio pacer and clearing queues", extra=self._get_log_extra(log_type="ces_pacer_stop"))
         self._stop_pacer_event.set()
@@ -258,7 +276,12 @@ class CESWS:
                     logger.info("Received endSession from CES", extra=self._get_log_extra(log_type="ces_recv_endsession", data={"data": data}))
                     metadata = data.get("endSession", {}).get("metadata", {})
                     params = metadata.get("params")
-                    if not self.genesys_ws.disconnect_initiated:
+                    if self.genesys_ws.genesys_close_pending and not self.genesys_ws.ces_data_received.is_set():
+                        logger.info("CES endSession: Genesys close is pending, sending final data.", extra=self._get_log_extra(log_type="ces_endsession_final_data"))
+                        final_data = {"info": "Session ended in CES.", "output_variables": params if params else {}}
+                        self.genesys_ws.ces_final_data = final_data
+                        self.genesys_ws.ces_data_received.set()
+                    elif not self.genesys_ws.disconnect_initiated:
                         asyncio.create_task(self.genesys_ws.send_disconnect("completed", info="Session has ended successfully in CES", output_variables=params))
                     await self.close() # Close CES connection
                     break # Exit listener loop

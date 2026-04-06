@@ -37,6 +37,10 @@ class GenesysWS:
         self.input_variables = None
         self.disconnect_initiated = False
         self.is_probe = False
+        self.genesys_close_pending = False
+        self.ces_final_data = {}
+        self.ces_data_received = asyncio.Event()
+        self.close_wait_timeout = 5  # Seconds to wait for CES data
 
     def _get_log_extra(self, log_type: str, data: dict = None):
         extra = {
@@ -233,19 +237,39 @@ class GenesysWS:
                     logger.warning("Received DTMF message without digit", extra=self._get_log_extra(log_type="genesys_recv_dtmf_missing", data={"data": data}))
 
             elif message_type == "close":
-                pass
+                logger.info("Received 'close' message from Genesys, signalling CES and waiting for final data...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
+                self.genesys_close_pending = True
+
+                if self.ces_ws and self.ces_ws.is_connected():
+                    logger.info("Sending 'wrapup' event to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
+                    await self.ces_ws.send_genesys_disconnect_event()
+                else:
+                    logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
+
+                try:
+                    logger.debug(f"Waiting up to {self.close_wait_timeout} seconds for CES data...", extra=self._get_log_extra(log_type="genesys_close_wait"))
+                    await asyncio.wait_for(self.ces_data_received.wait(), timeout=self.close_wait_timeout)
+                    logger.info("Final CES data received.", extra=self._get_log_extra(log_type="genesys_close_ces_data", data=self.ces_final_data))
+                    parameters = self.ces_final_data
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout waiting for CES data after {self.close_wait_timeout}s. Sending 'closed' without extra data.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
+                    parameters = {}
+                except Exception as e:
+                    logger.error(f"Error waiting for CES data: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
+                    parameters = {"info": f"Error during close wait: {e}"}
+                finally:
+                    self.genesys_close_pending = False
+
                 closed_message = {
                     "type": "closed",
                     "version": "2",
                     "id": self.client_session_id,
                     "clientseq": self.last_client_sequence_number,
-                    "parameters": {}
+                    "parameters": parameters  # Comes from self.ces_final_data or default on error
                 }
-                logger.info("Sending closed message to Genesys", extra=self._get_log_extra(log_type="genesys_send_closed", data={"closed_message": closed_message}))
+                logger.info("Sending 'closed' message to Genesys", extra=self._get_log_extra(log_type="genesys_send_closed", data={"closed_message": closed_message}))
                 await self.send_message(closed_message)
-                # We specifically DO NOT close the WebSocket here.
-                # AudioHook requires Genesys to receive this message before the TCP connection drops.
-                # We return to the read loop and let Genesys initiate the WebSocket CLOSE handshake.
+                # Genesys will close the connection after receiving 'closed'.
 
             elif message_type == "update":
                 logger.info("Received update message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_update", data={"data": data}))
