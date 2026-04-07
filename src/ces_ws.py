@@ -191,7 +191,7 @@ class CESWS:
             logger.warning("Cannot send DTMF, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_dtmf_error", data={"digit": redact_value(digit)}))
 
     async def send_genesys_disconnect_event(self):
-        logger.info("Attempting to send 'genesys-call-disconnect' event to CES", extra=self._get_log_extra(log_type="ces_send_event"))
+        logger.info("Attempting to send 'wrapup' event to CES", extra=self._get_log_extra(log_type="ces_send_event"))
         event_message = {
             "realtimeInput": {
                 "event": {
@@ -202,9 +202,9 @@ class CESWS:
         if self.is_connected():
             try:
                 await self.websocket.send(json.dumps(event_message))
-                logger.info("Sent 'genesys-call-disconnect' event to CES", extra=self._get_log_extra(log_type="ces_send_event_success", data=event_message))
+                logger.info("Sent 'wrapup' event to CES", extra=self._get_log_extra(log_type="ces_send_event_success", data=event_message))
             except Exception as e:
-                logger.error("Error sending 'genesys-call-disconnect' event to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_event_error"))
+                logger.error("Error sending 'wrapup' event to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_event_error"))
         else:
             logger.warning("Cannot send event, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_event_skip"))
 
