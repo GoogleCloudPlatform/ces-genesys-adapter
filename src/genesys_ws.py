@@ -20,7 +20,7 @@ import websockets
 from .ces_ws import CESWS
 from .redaction import redact, redact_value
 from websockets.protocol import State
-from .config import LOG_UNREDACTED_DATA
+from .config import LOG_UNREDACTED_DATA, DISCONNECT_EVENT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +92,7 @@ class GenesysWS:
             self.last_client_sequence_number = data.get("seq")
             self.client_session_id = data.get("id")
             message_type = data.get("type")
-
-            if message_type == "close":
-                logger.info("Received 'close' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_closed"))
-
             if message_type == "open":
-                logger.info("Received 'open' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_open"))
                 parameters = data.get("parameters", {})
                 self.conversation_id = parameters.get("conversationId")
 
@@ -237,37 +232,43 @@ class GenesysWS:
                     logger.warning("Received DTMF message without digit", extra=self._get_log_extra(log_type="genesys_recv_dtmf_missing", data={"data": data}))
 
             elif message_type == "close":
-                logger.info("Received 'close' message from Genesys, signalling CES and waiting for final data...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
-                self.genesys_close_pending = True
-
-                if self.ces_ws and self.ces_ws.is_connected():
-                    logger.info("Sending 'wrapup' event to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
-                    await self.ces_ws.send_genesys_disconnect_event()
-                else:
-                    logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
-
-                try:
-                    logger.debug(f"Waiting up to {self.close_wait_timeout} seconds for CES data...", extra=self._get_log_extra(log_type="genesys_close_wait"))
-                    await asyncio.wait_for(self.ces_data_received.wait(), timeout=self.close_wait_timeout)
-                    logger.info("Final CES data received.", extra=self._get_log_extra(log_type="genesys_close_ces_data", data=self.ces_final_data))
-                    parameters = self.ces_final_data
-                except asyncio.TimeoutError:
-                    logger.warning(f"Timeout waiting for CES data after {self.close_wait_timeout}s. Sending 'closed' without extra data.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
+                logger.info("Received 'close' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_closed"))
+                
+                if self.disconnect_initiated:
+                    logger.info("Disconnect already initiated by adapter, sending 'closed' immediately.", extra=self._get_log_extra(log_type="genesys_close_ack"))
                     parameters = {}
-                except Exception as e:
-                    logger.error(f"Error waiting for CES data: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
-                    parameters = {"info": f"Error during close wait: {e}"}
-                finally:
-                    self.genesys_close_pending = False
+                else:
+                    logger.info("Signalling CES and waiting for final data...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
+                    self.genesys_close_pending = True
+
+                    if self.ces_ws and self.ces_ws.is_connected() and not self.ces_ws.endsession_received:
+                        logger.info(f"Sending '{DISCONNECT_EVENT_NAME}' event to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
+                        await self.ces_ws.send_genesys_disconnect_event()
+                    else:
+                        logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
+
+                    try:
+                        logger.debug(f"Waiting up to {self.close_wait_timeout} seconds for CES data...", extra=self._get_log_extra(log_type="genesys_close_wait"))
+                        await asyncio.wait_for(self.ces_data_received.wait(), timeout=self.close_wait_timeout)
+                        logger.info("Final CES data received.", extra=self._get_log_extra(log_type="genesys_close_ces_data", data=self.ces_final_data))
+                        parameters = self.ces_final_data
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout waiting for CES data after {self.close_wait_timeout}s. Sending 'closed' without extra data.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
+                        parameters = {}
+                    except Exception as e:
+                        logger.error(f"Error waiting for CES data: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
+                        parameters = {"info": f"Error during close wait: {e}"}
+                    finally:
+                        self.genesys_close_pending = False
 
                 closed_message = {
                     "type": "closed",
                     "version": "2",
                     "id": self.client_session_id,
                     "clientseq": self.last_client_sequence_number,
-                    "parameters": parameters  # Comes from self.ces_final_data or default on error
+                    "parameters": parameters
                 }
-                logger.info("Sending 'closed' message to Genesys", extra=self._get_log_extra(log_type="genesys_send_closed", data={"closed_message": closed_message}))
+                logger.info("Sending 'closed' message to Genesys", extra=self._get_log_extra(log_type="genesys_send_closed", data={"closed_message": redact(closed_message)}))
                 await self.send_message(closed_message)
                 # Genesys will close the connection after receiving 'closed'.
 
@@ -284,6 +285,9 @@ class GenesysWS:
     async def send_disconnect(self, reason="normal", info=None, output_variables=None):
         if self.disconnect_initiated:
             logger.info("Disconnect already in progress, skipping duplicate call", extra=self._get_log_extra(log_type="genesys_disconnect_duplicate"))
+            return
+        if self.genesys_close_pending:
+            logger.info("Genesys close is pending, skipping send_disconnect", extra=self._get_log_extra(log_type="genesys_disconnect_skip_pending"))
             return
         self.disconnect_initiated = True
         logger.info("Preparing to send disconnect", extra=self._get_log_extra(log_type="genesys_disconnect_start", data={"reason": reason, "info": info, "output_variables": output_variables}))
