@@ -137,18 +137,29 @@ class CESWS:
                 logger.error("Error sending variables to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_variables_error"))
                 raise
 
-        kickstart_text = self.initial_message if self.initial_message else "Hello"
-        kickstart_message = {
-            "realtimeInput": {
-                "text": kickstart_text
+        if self.initial_message:
+            kickstart_message = {
+                "realtimeInput": {
+                    "text": self.initial_message
+                }
             }
-        }
+            log_message = "Sent kickstart message (text) to CES"
+            log_type = "ces_send_kickstart_text"
+        else:
+            kickstart_message = {
+                "realtimeInput": {
+                    "event": "session_start"
+                }
+            }
+            log_message = "Sent session_start event to CES"
+            log_type = "ces_send_session_start"
+
         try:
             await self.websocket.send(json.dumps(kickstart_message))
+            logger.info(log_message, extra=self._get_log_extra(log_type=log_type, data={"data": kickstart_message}))
         except Exception as e:
-            logger.error("Error sending kickstart message to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_kickstart_error"))
+            logger.error("Error sending kickstart/event message to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_kickstart_error"))
             raise
-        logger.info("Sent kickstart message to CES", extra=self._get_log_extra(log_type="ces_send_kickstart", data={"data": kickstart_message}))
 
     async def send_audio(self, audio_chunk):
         # Audio from Genesys is already 8kHz MULAW
