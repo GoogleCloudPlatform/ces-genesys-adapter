@@ -107,7 +107,7 @@ The reference implementation assumes a multi-region configuration for high-avail
 
 # 3. IAM (Identity and Access Management)
 
-IAM roles utilized for each step are documented below, it is important to ensure secure and controlled access of these call recording files:
+IAM roles utilized for each step are documented below, it is important to ensure secure and controlled access:
 
 1. Service Account (e.g., `ces-genesys-adapter@{YOUR_PROJECT_ID}.iam.gserviceaccount.com`):  
    * `roles/ces.client`: To interact with the Conversational Agents API (BidiRunSession).  
