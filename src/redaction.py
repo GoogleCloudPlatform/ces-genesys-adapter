@@ -14,6 +14,7 @@
 
 """Handles redaction of sensitive data."""
 
+import copy
 import json
 
 from .config import LOG_UNREDACTED_DATA
@@ -29,22 +30,23 @@ def redact_value(value: any) -> any:
 
 
 def dict_redact(data: dict) -> dict:
-    """Recursively redacts a dictionary.
+    """Recursively redacts a dictionary without mutating the original.
 
     Args:
         data: The dictionary to redact.
 
     Returns:
-        The redacted dictionary.
+        The redacted dictionary copy.
     """
-    for key, value in data.items():
+    data_copy = copy.deepcopy(data)
+    for key, value in data_copy.items():
         if key in REDACT_KEYS:
-            data[key] = "<REDACTED>"
+            data_copy[key] = "<REDACTED>"
         elif isinstance(value, dict):
-            data[key] = dict_redact(value)
+            data_copy[key] = dict_redact(value)
         elif isinstance(value, list):
-            data[key] = [dict_redact(item) if isinstance(item, dict) else item for item in value]
-    return data
+            data_copy[key] = [dict_redact(item) if isinstance(item, dict) else item for item in value]
+    return data_copy
 
 
 def redact(data: str | dict) -> str | dict:
