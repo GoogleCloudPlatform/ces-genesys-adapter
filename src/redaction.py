@@ -19,7 +19,7 @@ import json
 
 from .config import LOG_UNREDACTED_DATA
 
-REDACT_KEYS = ["inputVariables", "participant", "variables", "outputVariables"]
+REDACT_KEYS = ["inputVariables", "participant", "variables", "outputVariables", "output_variables", "diagnosticInfo", "params", "text"]
 
 
 def redact_value(value: any) -> any:

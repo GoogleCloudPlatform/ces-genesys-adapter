@@ -53,7 +53,7 @@ class GenesysWS:
             "ces_session_id": self.ces_ws.session_id if self.ces_ws and self.ces_ws.session_id else None
         }
         if data:
-            extra.update(data)
+            extra.update(redact(data))
         return extra
 
     async def handle_connection(self):

@@ -58,7 +58,7 @@ class CESWS:
         # The IDs are now added directly, no need to call genesys_ws._get_log_extra
         
         if data:
-            extra.update(data)
+            extra.update(redact(data))
         return extra
 
     def is_connected(self):
