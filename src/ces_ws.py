@@ -45,6 +45,7 @@ class CESWS:
         self.audio_out_queue = asyncio.Queue() # CES to Genesys
         self._stop_pacer_event = asyncio.Event()
         self.pacer_task = None
+        self.listen_task = None
         self.endsession_received = False
         self.final_params = {}
 
@@ -165,7 +166,8 @@ class CESWS:
 
     async def send_audio(self, audio_chunk):
         # Audio from Genesys is already 8kHz MULAW
-        logger.debug("CESWS: send_audio: Received MULAW audio", extra=self._get_log_extra(log_type="ces_send_audio_recv", data={"audio_size": len(audio_chunk)}))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("CESWS: send_audio: Received MULAW audio", extra=self._get_log_extra(log_type="ces_send_audio_recv", data={"audio_size": len(audio_chunk)}))
         base64_mulaw_payload = base64.b64encode(audio_chunk).decode("utf-8")
         va_input = {"realtimeInput": {"audio": base64_mulaw_payload}}
         if self.is_connected():
@@ -272,7 +274,8 @@ class CESWS:
     async def listen(self):
         while self.is_connected():
             try:
-                logger.debug("CES WS: Waiting for message...", extra=self._get_log_extra(log_type="ces_recv_wait"))
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("CES WS: Waiting for message...", extra=self._get_log_extra(log_type="ces_recv_wait"))
                 if self.endsession_received:
                     try:
                         message = await asyncio.wait_for(self.websocket.recv(), timeout=0.5)
@@ -296,7 +299,8 @@ class CESWS:
                 elif "sessionOutput" in data and "audio" in data["sessionOutput"]:
                     # Audio from CES is now 8kHz MULAW
                     mulaw_audio = base64.b64decode(data["sessionOutput"]["audio"])
-                    logger.debug("CESWS: listen: Received MULAW audio", extra=self._get_log_extra(log_type="ces_recv_audio", data={"audio_size": len(mulaw_audio)}))
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CESWS: listen: Received MULAW audio", extra=self._get_log_extra(log_type="ces_recv_audio", data={"audio_size": len(mulaw_audio)}))
                     await self.audio_out_queue.put(mulaw_audio)
 
                 elif "sessionOutput" in data and "text" in data["sessionOutput"]:
@@ -309,15 +313,11 @@ class CESWS:
                     self.endsession_received = True
                     metadata = data.get("endSession", {}).get("metadata", {})
                     params = metadata.get("params")
-                    if self.genesys_ws.genesys_close_pending and not self.genesys_ws.ces_data_received.is_set():
-                        logger.info("CES endSession: Genesys close is pending, sending final data.", extra=self._get_log_extra(log_type="ces_endsession_final_data"))
-                        final_data = {"info": "Session ended in CES.", "output_variables": params if params else {}}
-                        self.genesys_ws.ces_final_data = final_data
-                        self.genesys_ws.ces_data_received.set()
-                    elif not self.genesys_ws.disconnect_initiated:
+                    if not self.genesys_ws.disconnect_initiated:
                         # Save params for finalization after loop
                         self.final_params = params if params else {}
                         logger.info("CES endSession: Waiting for final audio...", extra=self._get_log_extra(log_type="ces_endsession_wait_audio"))
+                    self.genesys_ws.ces_data_received.set()
 
                 elif "recognitionResult" in data:
                     pass
@@ -328,9 +328,11 @@ class CESWS:
                 else:
                     logger.warning("Received unhandled message from CES", extra=self._get_log_extra(log_type="ces_recv_unhandled", data={"data": redact(data)}))
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning("CES WS connection closed unexpectedly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
-                if not self.genesys_ws.disconnect_initiated:
-                     await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
+                if self.genesys_ws.disconnect_initiated:
+                    logger.info("CES WS connection closed cleanly during teardown", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
+                else:
+                    logger.warning("CES WS connection closed unexpectedly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
+                    await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
                 self.genesys_ws.ces_data_received.set()
                 break
             except Exception as e:
@@ -355,7 +357,7 @@ class CESWS:
     async def pacer(self):
         logger.info("Starting audio pacer for Genesys", extra=self._get_log_extra(log_type="ces_pacer_start"))
         MAX_GENESYS_CHUNK_SIZE = 16000  # Bytes
-        MIN_INTERVAL = 0.2  # Seconds (200ms)
+        MIN_INTERVAL = 0.28  # Seconds (280ms)
         QUEUE_GET_TIMEOUT = 0.05 # Smaller timeout to react faster
 
         send_buffer = bytearray()
@@ -371,7 +373,8 @@ class CESWS:
                     audio_chunk = await asyncio.wait_for(self.audio_out_queue.get(), timeout=QUEUE_GET_TIMEOUT)
                     if audio_chunk:
                         send_buffer.extend(audio_chunk)
-                        logger.debug("Pacer added to buffer", extra=self._get_log_extra(log_type="ces_pacer_buffer", data={"buffer_size": len(send_buffer)}))
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("Pacer added to buffer", extra=self._get_log_extra(log_type="ces_pacer_buffer", data={"buffer_size": len(send_buffer)}))
                 except asyncio.TimeoutError:
                     pass  # No new audio, just check if we need to send
                 finally:
@@ -393,7 +396,8 @@ class CESWS:
                     chunk_to_send = bytes(send_buffer[:MAX_GENESYS_CHUNK_SIZE])
                     try:
                         await self.genesys_ws.websocket.send(chunk_to_send)
-                        logger.debug("Pacer sent to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send", data={"audio_size": len(chunk_to_send)}))
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("Pacer sent to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send", data={"audio_size": len(chunk_to_send)}))
                         send_buffer = send_buffer[len(chunk_to_send):]
                         last_send_time = current_time
                     except websockets.exceptions.ConnectionClosed:
