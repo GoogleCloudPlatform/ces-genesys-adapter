@@ -40,5 +40,6 @@ GENESYS_API_KEY = resolve_secret(os.getenv("GENESYS_API_KEY"))
 AUTH_TOKEN_SECRET_PATH = os.getenv("AUTH_TOKEN_SECRET_PATH")
 GENESYS_CLIENT_SECRET = resolve_secret(os.getenv("GENESYS_CLIENT_SECRET"))
 LOG_UNREDACTED_DATA = os.getenv("LOG_UNREDACTED_DATA")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEBUG_WEBSOCKETS = os.getenv("DEBUG_WEBSOCKETS", "false") == 'true'
 DISCONNECT_EVENT_NAME = os.getenv("DISCONNECT_EVENT_NAME", "sys.remote-call-disconnected")

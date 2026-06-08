@@ -605,6 +605,29 @@ You can filter logs in Cloud Logging using the `jsonPayload.log_type` field. Ref
 * `main_task_error`: Errors in the main request handling task.  
 * `config_error`: Errors during configuration loading.
 
+#### *4.2.7.1.1. Configurable Log Levels and Performance Optimization*
+
+By default, the adapter's root logging level is configured to `INFO` (meaning only high-level call states, errors, lifecycle transitions, and setup parameters are output). 
+
+To prevent event loop starvation and high CPU utilization under concurrent production loads, all high-frequency media packet logs (running at 50 times per second per call) are registered at the `DEBUG` level and guarded to avoid string formatting and memory allocation when the log level is higher.
+
+To change the log level, set the following environment variable:
+* `LOG_LEVEL`: Set to `DEBUG` to enable packet-level telemetry for troubleshooting, or `INFO` (default) for production deployment.
+
+When `LOG_LEVEL=DEBUG` is enabled, the following logs become available in Cloud Logging:
+
+| Log Type (`log_type`) | Message | Frequency | Description |
+| :--- | :--- | :--- | :--- |
+| `ces_send_audio_recv` | `CESWS: send_audio: Received MULAW audio` | High (50/sec per call) | Audio packets received from Genesys before base64 encoding and transmission to CES. |
+| `ces_recv_wait` | `CES WS: Waiting for message...` | High (Every Turn) | Logs that the socket is waiting for a new speech chunk or event response from CES. |
+| `ces_recv_audio` | `CESWS: listen: Received MULAW audio` | High (50/sec per call) | Incoming audio frames sent by CES after base64 decoding. |
+| `ces_pacer_buffer` | `Pacer added to buffer` | High (50/sec per call) | Logs when audio chunks are retrieved from queue and placed in the pacer buffer. |
+| `ces_pacer_send` | `Pacer sent to Genesys` | High (3.5/sec per call) | Logs when a packet is written over the socket to Genesys Cloud. |
+| `genesys_recv_wait` | `Genesys WS: Waiting for message...` | Low (Once per call) | Confirms the Genesys connection receiver loop has started. |
+| `genesys_close_wait` | `Waiting up to X seconds for CES data...` | Low (Once per call) | Logs when the adapter pauses to allow final audio queues to drain on wrapup. |
+| `genesys_recv_binary` | `GenesysWS: Received binary message` | High (50/sec per call) | Tracks raw binary AudioHook frame receipts on the socket. |
+| `genesys_send` | `Sending message to Genesys` | Low (Lifecycle events) | Logs raw JSON control payload frames sent to Genesys. |
+
 If you have enabled websocket debugging with the `DEBUG_WEBSOCKETS` environment variable set to `“true”`, then the logs will include a `websocket_trace` nested JSON object. This structured information allows for easier filtering and analysis of WebSocket traffic in Cloud Logging, aiding in debugging connection issues, message content problems, and protocol misunderstandings. This is recommended for lower environments or as a debugging tool to identify issues with the websocket connections between Genesys and CXAS. Refer to the data dictionary:
 
 * `direction`: (String) Indicates the message direction:  

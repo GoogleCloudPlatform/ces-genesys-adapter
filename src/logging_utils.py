@@ -112,7 +112,10 @@ class JSONFormatter(logging.Formatter):
 def setup_logger():
     """Sets up the root logger to use JSONFormatter."""
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+    
+    log_level_str = config.LOG_LEVEL.upper() if hasattr(config, "LOG_LEVEL") else "INFO"
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    logger.setLevel(log_level)
 
     # Remove any existing handlers
     for handler in logger.handlers[:]:
