@@ -43,6 +43,7 @@ class CESWS:
         self.deployment_id = None
         self.audio_in_queue = asyncio.Queue() # Genesys to CES
         self.audio_out_queue = asyncio.Queue() # CES to Genesys
+        self.pacer_send_buffer = bytearray() # Buffer for pacer
         self._stop_pacer_event = asyncio.Event()
         self.pacer_task = None
         self.listen_task = None
@@ -239,6 +240,9 @@ class CESWS:
                 logger.error("Error during pacer task cancellation", extra=self._get_log_extra(log_type="ces_pacer_error"), exc_info=True)
             self.pacer_task = None
 
+        # Clear the pacer send buffer
+        self.pacer_send_buffer.clear()
+
         # Clear any remaining items in the OUTBOUND queue (CES to Genesys)
         cleared_outbound_count = 0
         while not self.audio_out_queue.empty():
@@ -289,12 +293,31 @@ class CESWS:
                 if "interruptionSignal" in data:
                     logger.info("Received InterruptionSignal from CES", extra=self._get_log_extra(log_type="ces_recv_interruption"))
                     # Clear the audio out queue
+                    cleared_outbound_count = 0
                     while not self.audio_out_queue.empty():
                         try:
                             self.audio_out_queue.get_nowait()
+                            self.audio_out_queue.task_done()
+                            cleared_outbound_count += 1
                         except asyncio.QueueEmpty:
                             break
-                    logger.info("Cleared audio output queue due to InterruptionSignal", extra=self._get_log_extra(log_type="ces_recv_interruption"))
+                        except ValueError:
+                            break
+                    
+                    # Clear the pacer send buffer
+                    cleared_buffer_size = len(self.pacer_send_buffer)
+                    self.pacer_send_buffer.clear()
+                    
+                    logger.info(
+                        "Cleared audio output queue and pacer buffer due to InterruptionSignal",
+                        extra=self._get_log_extra(
+                            log_type="ces_recv_interruption_clear",
+                            data={
+                                "cleared_queue_chunks": cleared_outbound_count,
+                                "cleared_buffer_bytes": cleared_buffer_size
+                            }
+                        )
+                    )
 
                 elif "sessionOutput" in data and "audio" in data["sessionOutput"]:
                     # Audio from CES is now 8kHz MULAW
@@ -356,25 +379,28 @@ class CESWS:
 
     async def pacer(self):
         logger.info("Starting audio pacer for Genesys", extra=self._get_log_extra(log_type="ces_pacer_start"))
-        MAX_GENESYS_CHUNK_SIZE = 16000  # Bytes
         MIN_INTERVAL = 0.28  # Seconds (280ms)
+        MAX_GENESYS_CHUNK_SIZE = 16000  # Safety cap (64KB is protocol limit)
+        TARGET_SAFETY_BUFFER_MS = 500   # Buffer in Genesys to prevent starvation/jitter
+        PRIME_SIZE = int(TARGET_SAFETY_BUFFER_MS / 1000 * 8000)  # 4000 Bytes (500ms)
         QUEUE_GET_TIMEOUT = 0.05 # Smaller timeout to react faster
 
-        send_buffer = bytearray()
+        self.pacer_send_buffer.clear()
         last_send_time = asyncio.get_event_loop().time()
+        primed = False
 
         try:
             while not self._stop_pacer_event.is_set():
-                if self.endsession_received and self.audio_out_queue.empty() and not send_buffer:
+                if self.endsession_received and self.audio_out_queue.empty() and not self.pacer_send_buffer:
                     logger.info("Audio queue drained after endSession, stopping pacer.", extra=self._get_log_extra(log_type="ces_pacer_drained"))
                     break
                 audio_chunk = None
                 try:
                     audio_chunk = await asyncio.wait_for(self.audio_out_queue.get(), timeout=QUEUE_GET_TIMEOUT)
                     if audio_chunk:
-                        send_buffer.extend(audio_chunk)
+                        self.pacer_send_buffer.extend(audio_chunk)
                         if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("Pacer added to buffer", extra=self._get_log_extra(log_type="ces_pacer_buffer", data={"buffer_size": len(send_buffer)}))
+                            logger.debug("Pacer added to buffer", extra=self._get_log_extra(log_type="ces_pacer_buffer", data={"buffer_size": len(self.pacer_send_buffer)}))
                 except asyncio.TimeoutError:
                     pass  # No new audio, just check if we need to send
                 finally:
@@ -387,26 +413,42 @@ class CESWS:
                 current_time = asyncio.get_event_loop().time()
                 time_since_last_send = current_time - last_send_time
 
-                if send_buffer and time_since_last_send >= MIN_INTERVAL:
+                if self.pacer_send_buffer and time_since_last_send >= MIN_INTERVAL:
                     if not self.genesys_ws.websocket or self.genesys_ws.websocket.state == self.websocket.protocol.state.CLOSED:
                         logger.warning("Genesys WS closed, clearing send buffer", extra=self._get_log_extra(log_type="ces_pacer_discard"))
-                        send_buffer.clear()
+                        self.pacer_send_buffer.clear()
+                        primed = False
                         continue
 
-                    chunk_to_send = bytes(send_buffer[:MAX_GENESYS_CHUNK_SIZE])
-                    try:
-                        await self.genesys_ws.websocket.send(chunk_to_send)
-                        if logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("Pacer sent to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send", data={"audio_size": len(chunk_to_send)}))
-                        send_buffer = send_buffer[len(chunk_to_send):]
-                        last_send_time = current_time
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.warning("Genesys WS closed during send", extra=self._get_log_extra(log_type="ces_pacer_send_error"))
-                        break
-                    except Exception as e:
-                        logger.error("Error sending audio to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send_error"), exc_info=True)
-                        break
-                elif not send_buffer:
+                    if not primed:
+                        # Prime the Genesys buffer with a safety cushion to prevent jitter
+                        chunk_size = min(PRIME_SIZE, len(self.pacer_send_buffer))
+                        primed = True
+                        logger.info("Pacer priming Genesys buffer", extra=self._get_log_extra(log_type="ces_pacer_prime", data={"chunk_size": chunk_size}))
+                    else:
+                        # Send exactly the amount of audio that should have played since last send
+                        bytes_to_send = int(time_since_last_send * 8000)
+                        chunk_size = min(bytes_to_send, len(self.pacer_send_buffer))
+                        chunk_size = min(chunk_size, MAX_GENESYS_CHUNK_SIZE)
+
+                    if chunk_size > 0:
+                        chunk_to_send = bytes(self.pacer_send_buffer[:chunk_size])
+                        try:
+                            await self.genesys_ws.websocket.send(chunk_to_send)
+                            if logger.isEnabledFor(logging.DEBUG):
+                                logger.debug("Pacer sent to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send", data={"audio_size": len(chunk_to_send)}))
+                            self.pacer_send_buffer = self.pacer_send_buffer[chunk_size:]
+                            last_send_time = current_time
+                        except websockets.exceptions.ConnectionClosed:
+                            logger.warning("Genesys WS closed during send", extra=self._get_log_extra(log_type="ces_pacer_send_error"))
+                            break
+                        except Exception as e:
+                            logger.error("Error sending audio to Genesys", extra=self._get_log_extra(log_type="ces_pacer_send_error"), exc_info=True)
+                            break
+                elif not self.pacer_send_buffer:
+                    if primed:
+                        logger.info("Pacer buffer became empty, resetting primed state", extra=self._get_log_extra(log_type="ces_pacer_empty"))
+                        primed = False
                     await asyncio.sleep(0.01) # Prevent busy loop when idle
 
         except asyncio.CancelledError:
@@ -419,6 +461,7 @@ class CESWS:
             if not self.genesys_ws.disconnect_initiated:
                  await self.genesys_ws.send_disconnect("error", info=f"Pacer Error: {e}")
         logger.info("Audio pacer for Genesys stopped", extra=self._get_log_extra(log_type="ces_pacer_stopped"))
+
 
     async def close(self):
         """Closes the WebSocket connection to CES."""
