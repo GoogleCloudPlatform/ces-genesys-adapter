@@ -1,11 +1,11 @@
 # Copyright 2025 Google LLC
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,95 +13,193 @@
 # limitations under the License.
 
 import asyncio
+from contextlib import asynccontextmanager
 import http
 import logging
 import sys
+from typing import Optional
 import uuid
 
+from fastapi import FastAPI, Query, WebSocket, status
+from fastapi.responses import JSONResponse
+import uvicorn
 import websockets
+from websockets.connection import State
 
 from . import config
 from .auth import auth_provider
 from .genesys_ws import GenesysWS
+from .health import health_checker
 from .logging_utils import setup_logger
-from .redaction import redact
 
 # Setup JSON logging for the entire application
 setup_logger()
 logger = logging.getLogger(__name__)
-logger.info("Using websockets version", extra={"log_type": "init", "version": websockets.__version__})
 
 
-def process_request(connection, request):
+class FastApiWebSocketAdapter:
     """
-    This function is called before the WebSocket connection is established.
-    It handles /health checks and authenticates WebSocket upgrade requests
-    using the modern `websockets` API.
+    Adapter wrapper to bridge FastAPI WebSocket instances with standard
+    websockets Protocol interface used across the codebase.
     """
-    # Handle /health check endpoint
-    if request.path == "/health":
-        return connection.respond(http.HTTPStatus.OK, "OK\n")
 
-    # For all other paths, proceed with WebSocket authentication.
-    if not auth_provider.verify_request(request):
-        logger.info("Request came in", extra={"log_type": "auth", "path": request.path})
-        logger.warning("WebSocket connection rejected: invalid API key or signature.", extra={"log_type": "auth_error"})
-        return connection.respond(http.HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
+    def __init__(self, websocket: WebSocket):
+        self._ws = websocket
 
-    # If authentication is successful, return None to proceed with the handshake.
-    logger.info("WebSocket connection authenticated successfully.", extra={"log_type": "auth"})
-    return None
+    @property
+    def client(self):
+        return self._ws.client
+
+    @property
+    def state(self):
+        from fastapi.websockets import WebSocketState
+
+        if self._ws.client_state == WebSocketState.CONNECTED:
+            return State.OPEN
+        return State.CLOSED
+
+    async def send(self, data):
+        if isinstance(data, str):
+            await self._ws.send_text(data)
+        elif isinstance(data, (bytes, bytearray)):
+            await self._ws.send_bytes(bytes(data))
+
+    async def recv(self):
+        msg = await self._ws.receive()
+        if msg["type"] == "websocket.disconnect":
+            code = msg.get("code", 1000)
+            reason = msg.get("reason", "")
+            close_frame = websockets.frames.Close(code, reason)
+            if code in (1000, 1001):
+                raise websockets.exceptions.ConnectionClosedOK(close_frame, None)
+            raise websockets.exceptions.ConnectionClosedError(close_frame, None)
+        if "text" in msg and msg["text"] is not None:
+            return msg["text"]
+        elif "bytes" in msg and msg["bytes"] is not None:
+            return msg["bytes"]
+        close_frame = websockets.frames.Close(1000, "Closed")
+        raise websockets.exceptions.ConnectionClosedOK(close_frame, None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await self.recv()
+        except websockets.exceptions.ConnectionClosed:
+            raise StopAsyncIteration
 
 
-async def handler(websocket):
-    """
-    This function is called for each incoming WebSocket connection.
-    """
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: register signal handlers for graceful shutdown and container draining
+    try:
+        loop = asyncio.get_running_loop()
+        health_checker.register_signal_handlers(loop)
+    except Exception:
+        pass
+    logger.info("FastAPI application started", extra={"log_type": "init"})
+    yield
+    logger.info("FastAPI application shutting down", extra={"log_type": "shutdown"})
+
+
+app = FastAPI(title="CES Genesys Adapter", version="2.0.0", lifespan=lifespan)
+
+
+# 1. Active SRE Golden Signals Health Probe Endpoint
+@app.get("/health")
+async def health_check():
+    is_healthy, stats = await health_checker.evaluate_health()
+    if not is_healthy:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "unhealthy", "metrics": stats},
+        )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"status": "ok", "metrics": stats},
+    )
+
+
+# 2. WebSocket Upgrade Endpoints
+@app.websocket("/aai-ces-connector-1")
+@app.websocket("/audiohook")
+@app.websocket("/")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    conversationId: Optional[str] = Query(None),
+    _deployment_id: Optional[str] = Query(None),
+    _agent_id: Optional[str] = Query(None),
+):
+    # Validation 1: Verify deployment or agent ID present -> 400 Bad Request / WS 1008
+    if websocket.query_params and not conversationId:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Missing mandatory conversationId parameter",
+        )
+        return
+
+    if websocket.query_params and (not _deployment_id and not _agent_id):
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Missing deployment or agent ID",
+        )
+        return
+
+    # Validation 2: Check Container Draining / Auth Health -> 503 Service Unavailable / WS 1013
+    if health_checker.is_draining or not await health_checker.check_auth_health():
+        await websocket.close(
+            code=status.WS_1013_TRY_AGAIN_LATER,
+            reason="Service Unavailable",
+        )
+        return
+
+    # Validation 3: Verify Request Signatures / API Key -> 401 Unauthorized / WS 1008
+    if not auth_provider.verify_fastapi_request(websocket):
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Unauthorized",
+        )
+        return
+
+    # Accept WebSocket connection and hand over to GenesysWS handler
+    await websocket.accept()
+    adapted_ws = FastApiWebSocketAdapter(websocket)
     adapter_session_id = str(uuid.uuid4())
-    logger.info("New connection", extra={"log_type": "connection_start", "remote_address": websocket.remote_address, "adapter_session_id": adapter_session_id})
-    genesys_ws = GenesysWS(websocket, adapter_session_id)
+    logger.info(
+        "New WebSocket connection accepted via FastAPI",
+        extra={
+            "log_type": "connection_start",
+            "remote_address": str(websocket.client),
+            "adapter_session_id": adapter_session_id,
+        },
+    )
+    genesys_ws = GenesysWS(adapted_ws, adapter_session_id=adapter_session_id)
     await genesys_ws.handle_connection()
 
 
-async def main():
-    """
-    This is the main entry point of the application.
-    """
+def main():
     if not config.GENESYS_API_KEY:
-        logger.error("GENESYS_API_KEY environment variable not set.", extra={"log_type": "config_error"})
+        logger.error(
+            "GENESYS_API_KEY environment variable not set.",
+            extra={"log_type": "config_error"},
+        )
         sys.exit(1)
 
     if not config.GENESYS_CLIENT_SECRET:
-        logger.error("GENESYS_CLIENT_SECRET environment variable not set. This is required for signature verification.", extra={"log_type": "config_error"})
+        logger.error(
+            "GENESYS_CLIENT_SECRET environment variable not set. This is required for signature verification.",
+            extra={"log_type": "config_error"},
+        )
         sys.exit(1)
 
-    if config.AUTH_TOKEN_SECRET_PATH:
-        logger.info(
-            "Authenticating to CES using token-based auth",
-            extra={"log_type": "config", "secret_path": config.AUTH_TOKEN_SECRET_PATH}
-        )
-    else:
-        logger.info(
-            "Authenticating to CES using Application Default Credentials (ADC).",
-            extra={"log_type": "config"}
-        )
-
-    if config.GENESYS_CLIENT_SECRET:
-        logger.info("Genesys signature verification is enabled.", extra={"log_type": "config"})
-
-    logger.info("Starting WebSocket server", extra={"log_type": "init", "port": config.PORT})
-
-    # For older versions of `websockets`, we must catch the exception
-    # raised by plain HTTP requests (like health checks) to prevent crashes.
-    async with websockets.serve(
-        handler, "0.0.0.0", config.PORT, process_request=process_request,
-        max_size=4 * 1024 * 1024  # Increase limit to 4 MiB
-    ) as server:
-        await server.serve_forever()
+    port = int(config.PORT)
+    logger.info(
+        "Starting FastAPI server with Uvicorn",
+        extra={"log_type": "init", "port": port},
+    )
+    uvicorn.run("src.main:app", host="0.0.0.0", port=port, log_level="info")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Server stopped manually.", extra={"log_type": "shutdown"})
+    main()

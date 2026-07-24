@@ -64,11 +64,24 @@ class GenesysWS:
                     await self.handle_text_message(message)
                 elif isinstance(message, bytes):
                     await self.handle_binary_message(message)
-        except websockets.exceptions.ConnectionClosedError as e:
-            if self.disconnect_initiated:
-                logger.info("Genesys WebSocket closed as expected after disconnect process started.", extra=self._get_log_extra(log_type="genesys_connection_closed"))
+        except (websockets.exceptions.ConnectionClosedOK, websockets.exceptions.ConnectionClosedError) as e:
+            if self.disconnect_initiated or getattr(e, "code", 1000) in (1000, 1001):
+                logger.info(
+                    "Genesys WebSocket closed as expected.",
+                    extra=self._get_log_extra(
+                        log_type="genesys_connection_closed",
+                        data={"code": getattr(e, "code", 1000), "reason": getattr(e, "reason", "")}
+                    )
+                )
             else:
-                logger.error("Genesys WebSocket closed unexpectedly mid-session.", extra=self._get_log_extra(log_type="genesys_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}), exc_info=True)
+                logger.error(
+                    "Genesys WebSocket closed unexpectedly mid-session.",
+                    extra=self._get_log_extra(
+                        log_type="genesys_connection_closed",
+                        data={"code": getattr(e, "code", None), "reason": getattr(e, "reason", None), "exc": str(e)}
+                    ),
+                    exc_info=True
+                )
                 if self.ces_ws and self.ces_ws.is_connected():
                     await self.send_disconnect("error", info=f"Genesys WS ConnectionClosedError: {e}")
         except Exception as e:
@@ -79,6 +92,8 @@ class GenesysWS:
             logger.info("Genesys connection loop finished. Cleaning up CES connection.", extra=self._get_log_extra(log_type="genesys_connection_cleanup"))
             if self.ces_ws:
                 await self.ces_ws.close()
+                self.ces_ws.genesys_ws = None
+            self.ces_ws = None
 
     async def handle_text_message(self, message):
         redacted_message = redact(message)

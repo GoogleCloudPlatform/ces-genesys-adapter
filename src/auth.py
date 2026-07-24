@@ -50,7 +50,8 @@ class Auth:
                 # ADC-based auth
                 creds, _ = google.auth.default()
                 auth_req = google_auth_requests.Request()
-                creds.refresh(auth_req)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: creds.refresh(auth_req))
                 return creds.token
 
     async def _fetch_token_from_secret_manager(self):
@@ -63,7 +64,10 @@ class Auth:
 
         try:
             logger.info("Fetching auth token from secret manager", extra={"secret_path": secret_path})
-            response = self._sm_client.access_secret_version(name=secret_path)
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None, lambda: self._sm_client.access_secret_version(name=secret_path)
+            )
             payload = response.payload.data.decode("UTF-8")
             token_data = json.loads(payload)
 
@@ -82,6 +86,13 @@ class Auth:
             # If we fail, clear the token info to force a retry on the next call.
             self._token_info = {}
             raise
+
+    def verify_fastapi_request(self, websocket):
+        class FastApiRequestWrapper:
+            def __init__(self, ws):
+                self.headers = ws.headers
+                self.path = ws.url.path
+        return self.verify_request(FastApiRequestWrapper(websocket))
 
     def verify_request(self, request):
         headers = request.headers

@@ -10,3 +10,4 @@ script/values.sh
 script/values-pakminw.sh
 script/deploy-pakminw.sh
 tmp
+tests
