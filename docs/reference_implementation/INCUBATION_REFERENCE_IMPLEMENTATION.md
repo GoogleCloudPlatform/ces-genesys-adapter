@@ -306,7 +306,17 @@ DEBUG_WEBSOCKETS="false" # Defaults to "false"; setting to "true" is only recomm
 **Note**: There are two modes of loading secrets on the application:
 
 1. The first mode is using Cloud Run’s native secret injection. This is the recommended approach used in this reference implementation.  
-   2. The second mode is to have the application fetch the secrets at runtime using the path to the secret. 
+2. The second mode is to have the application fetch the secrets at runtime using the path to the secret. 
+
+### Advanced SRE & Health Probe Variables
+
+The application contains an integrated SRE health checker at the `/health` endpoint to compute rolling 60-second operational vitals. To override the default thresholds, add the following to your deployment environment:
+*   `HEALTH_WINDOW_SECONDS` (Default: `60`): The rolling window duration for calculating adapter latencies and event-loop statistics.
+*   `HEALTH_MIN_SAMPLES` (Default: `15`): The minimum number of samples required before performance metrics are evaluated.
+*   `MAX_CES_ERROR_RATE_PCT` (Default: `25.0`): The ceiling percentage for acceptable upstream CES backend errors.
+*   `MAX_CES_AVG_LATENCY_MS` (Default: `1500.0`): The ceiling for acceptable downstream Audio latency in milliseconds.
+*   `MAX_EVENT_LOOP_LAG_MS` (Default: `500.0`): The critical limit for instance CPU blocking. If the asyncio event loop lags beyond this ceiling, the container will proactively drain and return `503 Service Unavailable` to the load balancer's `/health` probe to shed load.
+
 
 2. Set your environment variables prior to deploying:
 
@@ -452,6 +462,10 @@ gcloud compute backend-services update [BACKEND_SERVICE_NAME] \
     --enable-logging \
     --logging-sample-rate=1.0
 ```
+
+4. Configure the Health Check
+
+The Load Balancer's health check should be configured as an HTTP check polling the `/health` path. This SRE path is now natively supported alongside the WS traffic on port 8080 in the container and evaluates robust, container-local conditions and downstream latency ceilings. Ensure this health check is created and attached to the Backend Service.
 
 ### 4.2.6. Set up Frontend & SSL
 

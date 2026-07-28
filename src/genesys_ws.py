@@ -249,6 +249,7 @@ class GenesysWS:
                 if self.disconnect_initiated:
                     logger.info("Disconnect already initiated by adapter, sending 'closed' immediately.", extra=self._get_log_extra(log_type="genesys_close_ack"))
                 else:
+                    self.disconnect_initiated = True
                     logger.info("Signalling CES and waiting up to 2s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
                     if self.ces_ws and self.ces_ws.is_connected() and not self.ces_ws.endsession_received:
                         logger.info(f"Sending '{DISCONNECT_EVENT_NAME}' event to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
@@ -264,8 +265,6 @@ class GenesysWS:
                             logger.error(f"Error waiting for CES event: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
                     else:
                         logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
-
-                self.disconnect_initiated = True
 
                 if self.ces_ws:
                     logger.info("Teardown: Closing CES connection before sending 'closed' to Genesys", extra=self._get_log_extra(log_type="genesys_close_ces_teardown"))
@@ -375,13 +374,5 @@ class GenesysWS:
             }))
         except Exception as e:
             logger.error("Failed to send error report to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_error_report_failed", data={
-                "errorType": errorType
-            }))
-        except Exception as e:
-            logger.error("Failed to send error report to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_error_report_failed", data={
-                "errorType": errorType
-            }))
-
-            logger.error("Failed to send error report to Genesys", exc_info=True, extra=self._get_log_extra({
                 "errorType": errorType
             }))

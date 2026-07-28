@@ -45,6 +45,9 @@ class FastApiWebSocketAdapter:
 
     def __init__(self, websocket: WebSocket):
         self._ws = websocket
+        self._rate_limit = 50.0  # max 50 messages per second
+        self._tokens = self._rate_limit
+        self._last_token_update = None
 
     @property
     def client(self):
@@ -58,7 +61,30 @@ class FastApiWebSocketAdapter:
             return State.OPEN
         return State.CLOSED
 
+    async def _wait_for_token(self):
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        
+        if self._last_token_update is None:
+            self._last_token_update = now
+            self._tokens -= 1.0
+            return
+
+        while True:
+            elapsed = now - self._last_token_update
+            self._tokens = min(self._rate_limit, self._tokens + (elapsed * self._rate_limit))
+            self._last_token_update = now
+
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            
+            wait_time = (1.0 - self._tokens) / self._rate_limit
+            await asyncio.sleep(max(0.01, wait_time))
+            now = loop.time()
+
     async def send(self, data):
+        await self._wait_for_token()
         if isinstance(data, str):
             await self._ws.send_text(data)
         elif isinstance(data, (bytes, bytearray)):

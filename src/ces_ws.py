@@ -93,7 +93,8 @@ class CESWS:
                     "Authorization": f"Bearer {token}",
                     "X-Goog-User-Project": project_id,
                 },
-                max_size=4 * 1024 * 1024  # Increase limit to 4MiB to prevent message size errors
+                max_size=4 * 1024 * 1024,  # Increase limit to 4MiB to prevent message size errors
+                open_timeout=30            # Increase to 30s to survive burst network delays
             )
             logger.info("Connected to CES", extra=self._get_log_extra(log_type="ces_connect"))
             await self.send_config_message(rehydration_payload=rehydration_payload)
@@ -239,6 +240,14 @@ class CESWS:
                 logger.error(f"Error sending '{DISCONNECT_EVENT_NAME}' event to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_event_error"))
         else:
             logger.warning("Cannot send event, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_event_skip"))
+
+    async def send_client_half_close(self):
+        logger.info("Sending clientHalfClose to CES", extra=self._get_log_extra(log_type="ces_send_half_close"))
+        if self.is_connected():
+            try:
+                await self.websocket.send(json.dumps({"clientHalfClose": True}))
+            except Exception as e:
+                logger.error("Failed to send clientHalfClose", exc_info=True, extra=self._get_log_extra(log_type="ces_half_close_error"))
 
     async def stop_audio(self):
         logger.info("Stopping audio pacer and clearing queues", extra=self._get_log_extra(log_type="ces_pacer_stop"))
@@ -454,10 +463,10 @@ class CESWS:
                 await self.pacer_task # Wait for pacer to drain naturally
             except Exception as e:
                 logger.error(f"Error waiting for pacer to drain: {e}", exc_info=True, extra=self._get_log_extra(log_type="ces_finalize_error"))
-                
+
         await self.close()
 
-        if self.endsession_received and not self.genesys_ws.disconnect_initiated:
+        if getattr(self, "endsession_received", False) and not getattr(self.genesys_ws, "disconnect_initiated", False):
             await self.genesys_ws.send_disconnect("completed", info="Session has ended successfully in CES", output_variables=self.final_params)
 
     async def pacer(self):
@@ -517,6 +526,11 @@ class CESWS:
                         chunk_size = min(chunk_size, MAX_GENESYS_CHUNK_SIZE)
 
                     if chunk_size > 0:
+                        if chunk_size < 320 and not getattr(self, "endsession_received", False):
+                            # Chunk too small, yield to prevent AudioHook-0012 tiny-frame spam
+                            await asyncio.sleep(0.01)
+                            continue
+
                         chunk_to_send = bytes(self.pacer_send_buffer[:chunk_size])
                         try:
                             await self.genesys_ws.websocket.send(chunk_to_send)
@@ -555,6 +569,7 @@ class CESWS:
         """Closes the WebSocket connection to CES."""
         await self.stop_audio()
         if self.is_connected():
+            await self.send_client_half_close()
             logger.info("Closing WebSocket connection to CES", extra=self._get_log_extra(log_type="ces_close"))
             await self.websocket.close()
         else:
