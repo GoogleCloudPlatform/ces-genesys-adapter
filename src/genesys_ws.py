@@ -266,9 +266,11 @@ class GenesysWS:
                     else:
                         logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
 
-                if self.ces_ws:
-                    logger.info("Teardown: Closing CES connection before sending 'closed' to Genesys", extra=self._get_log_extra(log_type="genesys_close_ces_teardown"))
-                    await self.ces_ws.close()
+                if self.disconnect_initiated:
+                    logger.info("Disconnect already initiated by adapter, sending 'closed' immediately.", extra=self._get_log_extra(log_type="genesys_close_ack"))
+                else:
+                    self.disconnect_initiated = True
+                    asyncio.create_task(self._background_ces_teardown())
 
                 closed_message = {
                     "type": "closed",
@@ -290,6 +292,28 @@ class GenesysWS:
         except json.JSONDecodeError:
             logger.error("Error decoding JSON from Genesys", extra=self._get_log_extra(log_type="genesys_json_decode_error", data={"message": message}))
             await self.send_disconnect("error", "Invalid JSON received")
+
+    async def _background_ces_teardown(self):
+        logger.info("Signalling CES and waiting up to 2.0s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
+        if self.ces_ws and getattr(self.ces_ws, "is_connected", lambda: False)() and not getattr(self.ces_ws, "endsession_received", False):
+            logger.info(f"Sending '{DISCONNECT_EVENT_NAME}' event and clientHalfClose to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
+            try:
+                await self.ces_ws.send_genesys_disconnect_event()
+                await self.ces_ws.send_client_half_close()
+                logger.debug(f"Waiting up to 2.0 seconds for CES to process disconnect event...", extra=self._get_log_extra(log_type="genesys_close_wait"))
+                await asyncio.wait_for(self.ces_data_received.wait(), timeout=2.0)
+                await asyncio.sleep(0.5)
+                logger.info("CES finished processing disconnect event.", extra=self._get_log_extra(log_type="genesys_close_ces_complete"))
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout waiting for CES to process event after 2.0s. Proceeding with close.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
+            except Exception as e:
+                logger.error(f"Error waiting for CES event: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
+        else:
+            logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
+
+        if self.ces_ws:
+            logger.info("Closing CES WS now", extra=self._get_log_extra(log_type="genesys_close_ces_call"))
+            await self.ces_ws.close()
 
     async def send_disconnect(self, reason="normal", info=None, output_variables=None):
         if self.disconnect_initiated:
@@ -315,8 +339,8 @@ class GenesysWS:
 
         if self.ces_ws:
             logger.info("Stopping audio and clearing queues...", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
-            await self.ces_ws.stop_audio()
-            logger.info("Audio queues cleared by stop_audio.", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
+            await self.ces_ws.close() # Make sure we close and clean up tasks
+            logger.info("Audio queues cleared and tasks cleaned up.", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
 
         logger.info("Sending disconnect message to Genesys", extra=self._get_log_extra(log_type="genesys_send_disconnect", data={"disconnect_message": redact(disconnect_message)}))
         await self.send_message(disconnect_message)
@@ -338,12 +362,14 @@ class GenesysWS:
 
     async def send_message(self, message):
         if not self.websocket or self.websocket.state != State.OPEN:
-            logger.warning("Attempted to send message on non-open WebSocket", extra=self._get_log_extra(log_type="genesys_send_error", data={"payload": redact(message)}))
+            logger.debug("Attempted to send message on non-open WebSocket", extra=self._get_log_extra(log_type="genesys_send_error", data={"payload": redact(message)}))
             return
         try:
             message['seq'] = self.get_next_server_sequence_number()
             logger.debug("Sending message to Genesys", extra=self._get_log_extra(log_type="genesys_send", data={"payload": redact(message)}))
             await self.websocket.send(json.dumps(message))
+        except RuntimeError as e:
+            logger.warning(f"RuntimeError during send to Genesys (connection closing?): {e}", extra=self._get_log_extra(log_type="genesys_send_runtime_error"))
         except Exception as e:
             logger.error("Error sending message to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_send_error", data={"payload": redact(message)}))
             raise
@@ -365,6 +391,11 @@ class GenesysWS:
             "type": "data",
             "payload": error_payload
         }
+        
+        if self.disconnect_initiated:
+            logger.debug("Suppressing error report due to disconnect in progress.", extra=self._get_log_extra(log_type="genesys_error_report_suppress"))
+            return
+            
         try:
             await self.send_message(data_message)
             logger.info("Sent error report to Genesys", extra=self._get_log_extra(log_type="genesys_send_error_report", data={

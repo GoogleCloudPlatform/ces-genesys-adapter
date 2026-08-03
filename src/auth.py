@@ -97,10 +97,14 @@ class Auth:
     def verify_request(self, request):
         headers = request.headers
         # API Key Verification
-        received_api_key = headers.get("x-api-key")
+        received_api_key = headers.get("x-api-key", "")
         logger.info(f"Received x-api-key: '{redact_value(received_api_key)}'")
         logger.info(f"Expected API key: '{redact_value(config.GENESYS_API_KEY)}'")
-        if received_api_key != config.GENESYS_API_KEY:
+        
+        # Guard against None in config.GENESYS_API_KEY for robust typing
+        expected_key = config.GENESYS_API_KEY or ""
+        
+        if not hmac.compare_digest(received_api_key, expected_key):
             logger.warning("API key verification failed.")
             return False
 

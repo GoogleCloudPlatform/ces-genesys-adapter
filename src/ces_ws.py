@@ -48,6 +48,7 @@ class CESWS:
         self.pacer_task = None
         self.listen_task = None
         self.endsession_received = False
+        self.half_closed = False
         self.final_params = {}
 
     def _get_log_extra(self, log_type: str, data: dict = None):
@@ -242,10 +243,13 @@ class CESWS:
             logger.warning("Cannot send event, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_event_skip"))
 
     async def send_client_half_close(self):
+        if self.half_closed:
+            return
         logger.info("Sending clientHalfClose to CES", extra=self._get_log_extra(log_type="ces_send_half_close"))
         if self.is_connected():
             try:
                 await self.websocket.send(json.dumps({"clientHalfClose": True}))
+                self.half_closed = True
             except Exception as e:
                 logger.error("Failed to send clientHalfClose", exc_info=True, extra=self._get_log_extra(log_type="ces_half_close_error"))
 
@@ -441,8 +445,8 @@ class CESWS:
                 else:
                     logger.warning("Received unhandled message from CES", extra=self._get_log_extra(log_type="ces_recv_unhandled", data={"data": redact(data)}))
             except websockets.exceptions.ConnectionClosed as e:
-                if self.genesys_ws.disconnect_initiated:
-                    logger.info("CES WS connection closed cleanly during teardown", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
+                if self.genesys_ws.disconnect_initiated or e.code in (1000, 1001):
+                    logger.info("CES WS connection closed cleanly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
                 else:
                     logger.warning("CES WS connection closed unexpectedly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
                     await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")

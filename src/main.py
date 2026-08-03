@@ -48,6 +48,7 @@ class FastApiWebSocketAdapter:
         self._rate_limit = 50.0  # max 50 messages per second
         self._tokens = self._rate_limit
         self._last_token_update = None
+        self._is_closing = False
 
     @property
     def client(self):
@@ -84,11 +85,32 @@ class FastApiWebSocketAdapter:
             now = loop.time()
 
     async def send(self, data):
+        from fastapi.websockets import WebSocketState
+        
+        if self._ws.client_state != WebSocketState.CONNECTED or self._is_closing:
+            close_frame = websockets.frames.Close(1001, "Connection closing")
+            raise websockets.exceptions.ConnectionClosedOK(close_frame, None)
+            
         await self._wait_for_token()
-        if isinstance(data, str):
-            await self._ws.send_text(data)
-        elif isinstance(data, (bytes, bytearray)):
-            await self._ws.send_bytes(bytes(data))
+        
+        try:
+            if isinstance(data, str):
+                await self._ws.send_text(data)
+            elif isinstance(data, (bytes, bytearray)):
+                await self._ws.send_bytes(bytes(data))
+        except RuntimeError:
+            close_frame = websockets.frames.Close(1001, "Runtime disconnect")
+            raise websockets.exceptions.ConnectionClosedOK(close_frame, None)
+
+    async def close(self, code=1000, reason=""):
+        self._is_closing = True
+        try:
+            await self._ws.close(code=code, reason=reason)
+        except RuntimeError:
+            # Swallow 'Cannot call close once a close message has been sent'
+            pass
+        except Exception:
+            pass
 
     async def recv(self):
         msg = await self._ws.receive()
