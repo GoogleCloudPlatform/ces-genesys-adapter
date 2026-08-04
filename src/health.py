@@ -120,9 +120,7 @@ class HealthChecker:
         except Exception:
             return False
 
-    async def evaluate_health(self) -> Tuple[bool, Dict]:
-        ces_stats = self.ces_metrics.get_stats()
-        genesys_stats = self.genesys_metrics.get_stats()
+    async def evaluate_liveness(self) -> Tuple[bool, Dict]:
         loop_ok, loop_lag_ms = await self.check_event_loop_lag()
         auth_ok = await self.check_auth_health()
 
@@ -130,8 +128,6 @@ class HealthChecker:
             "draining": self.is_draining,
             "event_loop_lag_ms": loop_lag_ms,
             "auth_healthy": auth_ok,
-            "ces_metrics": ces_stats,
-            "genesys_metrics": genesys_stats,
         }
 
         # Container-local Health Gates ONLY
@@ -147,7 +143,30 @@ class HealthChecker:
             stats["unhealthy_reason"] = "auth_health_failed"
             return False, stats
 
-        # CES and Genesys metrics are tracked and reported in stats, but DO NOT fail /health
+        return True, stats
+
+    async def evaluate_readiness(self) -> Tuple[bool, Dict]:
+        is_live, stats = await self.evaluate_liveness()
+        
+        ces_stats = self.ces_metrics.get_stats()
+        genesys_stats = self.genesys_metrics.get_stats()
+        
+        stats["ces_metrics"] = ces_stats
+        stats["genesys_metrics"] = genesys_stats
+        
+        if not is_live:
+            return False, stats
+
+        # Evaluate CES metrics against thresholds if we have enough samples
+        if ces_stats["sample_count"] >= HEALTH_MIN_SAMPLES:
+            if ces_stats["avg_latency_ms"] > MAX_CES_AVG_LATENCY_MS:
+                stats["unhealthy_reason"] = f"ces_latency_exceeded_{ces_stats['avg_latency_ms']}ms"
+                return False, stats
+            
+            if ces_stats["error_rate_pct"] > MAX_CES_ERROR_RATE_PCT:
+                stats["unhealthy_reason"] = f"ces_error_rate_exceeded_{ces_stats['error_rate_pct']}%"
+                return False, stats
+
         return True, stats
 
 

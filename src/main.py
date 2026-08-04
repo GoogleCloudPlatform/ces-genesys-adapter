@@ -86,6 +86,7 @@ class FastApiWebSocketAdapter:
 
     async def send(self, data):
         from fastapi.websockets import WebSocketState
+        from starlette.websockets import WebSocketDisconnect
         
         if self._ws.client_state != WebSocketState.CONNECTED or self._is_closing:
             close_frame = websockets.frames.Close(1001, "Connection closing")
@@ -98,7 +99,7 @@ class FastApiWebSocketAdapter:
                 await self._ws.send_text(data)
             elif isinstance(data, (bytes, bytearray)):
                 await self._ws.send_bytes(bytes(data))
-        except RuntimeError:
+        except (RuntimeError, WebSocketDisconnect):
             close_frame = websockets.frames.Close(1001, "Runtime disconnect")
             raise websockets.exceptions.ConnectionClosedOK(close_frame, None)
 
@@ -134,7 +135,7 @@ class FastApiWebSocketAdapter:
     async def __anext__(self):
         try:
             return await self.recv()
-        except websockets.exceptions.ConnectionClosed:
+        except websockets.exceptions.ConnectionClosedOK:
             raise StopAsyncIteration
 
 
@@ -154,10 +155,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CES Genesys Adapter", version="2.0.0", lifespan=lifespan)
 
 
-# 1. Active SRE Golden Signals Health Probe Endpoint
-@app.get("/health")
-async def health_check():
-    is_healthy, stats = await health_checker.evaluate_health()
+# 1. Active SRE Golden Signals Health Probe Endpoints
+@app.get("/health/liveness")
+async def liveness_check():
+    is_healthy, stats = await health_checker.evaluate_liveness()
+    if not is_healthy:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "unhealthy", "metrics": stats},
+        )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"status": "ok", "metrics": stats},
+    )
+
+
+@app.get("/health/readiness")
+async def readiness_check():
+    is_healthy, stats = await health_checker.evaluate_readiness()
     if not is_healthy:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
