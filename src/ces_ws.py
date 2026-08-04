@@ -49,6 +49,8 @@ class CESWS:
         self.listen_task = None
         self.endsession_received = False
         self.half_closed = False
+        self._is_closed = False
+        self._reconnect_task = None
         self.final_params = {}
 
     def _get_log_extra(self, log_type: str, data: dict = None):
@@ -371,7 +373,7 @@ class CESWS:
                     logger.debug("CES WS: Waiting for message...", extra=self._get_log_extra(log_type="ces_recv_wait"))
                 if self.endsession_received:
                     try:
-                        message = await asyncio.wait_for(self.websocket.recv(), timeout=0.5)
+                        message = await asyncio.wait_for(self.websocket.recv(), timeout=5.0)
                     except asyncio.TimeoutError:
                         logger.info("Timeout waiting for audio after endSession. Exiting listen loop.", extra=self._get_log_extra(log_type="ces_listen_timeout"))
                         break
@@ -434,7 +436,7 @@ class CESWS:
                 elif "goAway" in data:
                     logger.info("Received goAway from CES (approaching session limit)", extra=self._get_log_extra(log_type="ces_recv_goaway", data={"data": data}))
                     # Rehydrate silently without interrupting Genesys caller
-                    asyncio.create_task(self.reconnect_and_rehydrate())
+                    self._reconnect_task = asyncio.create_task(self.reconnect_and_rehydrate())
 
                 elif "recognitionResult" in data:
                     pass
@@ -571,7 +573,26 @@ class CESWS:
 
     async def close(self):
         """Closes the WebSocket connection to CES."""
+        if getattr(self, "_is_closed", False):
+            return
+        self._is_closed = True
         await self.stop_audio()
+        
+        current_task = asyncio.current_task()
+        if getattr(self, "listen_task", None) and self.listen_task != current_task:
+            self.listen_task.cancel()
+            try:
+                await self.listen_task
+            except asyncio.CancelledError:
+                pass
+                
+        if getattr(self, "_reconnect_task", None) and self._reconnect_task != current_task:
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+
         if self.is_connected():
             await self.send_client_half_close()
             logger.info("Closing WebSocket connection to CES", extra=self._get_log_extra(log_type="ces_close"))

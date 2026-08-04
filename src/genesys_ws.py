@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import websockets
+from starlette.websockets import WebSocketDisconnect
 
 from .ces_ws import CESWS
 from .redaction import redact, redact_value
@@ -90,8 +91,26 @@ class GenesysWS:
                  await self.send_disconnect("error", info=f"WebSocket Error: {e}")
         finally:
             logger.info("Genesys connection loop finished. Cleaning up CES connection.", extra=self._get_log_extra(log_type="genesys_connection_cleanup"))
+            
+            # Wait for active teardown task (if Genesys sent 'close' cleanly)
+            if getattr(self, "_teardown_task", None) and not self._teardown_task.done():
+                logger.info("Awaiting active background teardown task to complete...", extra=self._get_log_extra(log_type="genesys_teardown_wait"))
+                try:
+                    await self._teardown_task
+                except Exception as e:
+                    logger.error(f"Error in teardown task: {e}", extra=self._get_log_extra(log_type="genesys_teardown_task_error"), exc_info=True)
+
+            # If client disconnected abruptly without sending 'close' or 'session_disconnect'
+            if not getattr(self, "disconnect_initiated", False):
+                logger.info("Abrupt client disconnect detected. Executing graceful teardown inline.", extra=self._get_log_extra(log_type="genesys_abrupt_teardown"))
+                self.disconnect_initiated = True
+                try:
+                    await self._background_ces_teardown()
+                except Exception as e:
+                    logger.error(f"Error during abrupt teardown: {e}", extra=self._get_log_extra(log_type="genesys_abrupt_teardown_error"), exc_info=True)
+
+            # The teardown process securely closes the socket. We can safely release memory.
             if self.ces_ws:
-                await self.ces_ws.close()
                 self.ces_ws.genesys_ws = None
             self.ces_ws = None
 
@@ -250,27 +269,7 @@ class GenesysWS:
                     logger.info("Disconnect already initiated by adapter, sending 'closed' immediately.", extra=self._get_log_extra(log_type="genesys_close_ack"))
                 else:
                     self.disconnect_initiated = True
-                    logger.info("Signalling CES and waiting up to 2s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
-                    if self.ces_ws and self.ces_ws.is_connected() and not self.ces_ws.endsession_received:
-                        logger.info(f"Sending '{DISCONNECT_EVENT_NAME}' event to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
-                        await self.ces_ws.send_genesys_disconnect_event()
-                        
-                        try:
-                            logger.debug(f"Waiting up to {self.close_wait_timeout} seconds for CES to process disconnect event...", extra=self._get_log_extra(log_type="genesys_close_wait"))
-                            await asyncio.wait_for(self.ces_data_received.wait(), timeout=self.close_wait_timeout)
-                            logger.info("CES finished processing disconnect event.", extra=self._get_log_extra(log_type="genesys_close_ces_complete"))
-                        except asyncio.TimeoutError:
-                            logger.warning(f"Timeout waiting for CES to process event after {self.close_wait_timeout}s. Proceeding with close.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
-                        except Exception as e:
-                            logger.error(f"Error waiting for CES event: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
-                    else:
-                        logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
-
-                if self.disconnect_initiated:
-                    logger.info("Disconnect already initiated by adapter, sending 'closed' immediately.", extra=self._get_log_extra(log_type="genesys_close_ack"))
-                else:
-                    self.disconnect_initiated = True
-                    asyncio.create_task(self._background_ces_teardown())
+                    self._teardown_task = asyncio.create_task(self._background_ces_teardown())
 
                 closed_message = {
                     "type": "closed",
@@ -294,18 +293,18 @@ class GenesysWS:
             await self.send_disconnect("error", "Invalid JSON received")
 
     async def _background_ces_teardown(self):
-        logger.info("Signalling CES and waiting up to 2.0s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
+        logger.info("Signalling CES and waiting up to 10.0s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
         if self.ces_ws and getattr(self.ces_ws, "is_connected", lambda: False)() and not getattr(self.ces_ws, "endsession_received", False):
             logger.info(f"Sending '{DISCONNECT_EVENT_NAME}' event and clientHalfClose to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
             try:
                 await self.ces_ws.send_genesys_disconnect_event()
                 await self.ces_ws.send_client_half_close()
-                logger.debug(f"Waiting up to 2.0 seconds for CES to process disconnect event...", extra=self._get_log_extra(log_type="genesys_close_wait"))
-                await asyncio.wait_for(self.ces_data_received.wait(), timeout=2.0)
+                logger.debug(f"Waiting up to 10.0 seconds for CES to process disconnect event...", extra=self._get_log_extra(log_type="genesys_close_wait"))
+                await asyncio.wait_for(self.ces_data_received.wait(), timeout=10.0)
                 await asyncio.sleep(0.5)
                 logger.info("CES finished processing disconnect event.", extra=self._get_log_extra(log_type="genesys_close_ces_complete"))
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout waiting for CES to process event after 2.0s. Proceeding with close.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
+                logger.warning(f"Timeout waiting for CES to process event after 10.0s. Proceeding with close.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
             except Exception as e:
                 logger.error(f"Error waiting for CES event: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
         else:
@@ -368,8 +367,8 @@ class GenesysWS:
             message['seq'] = self.get_next_server_sequence_number()
             logger.debug("Sending message to Genesys", extra=self._get_log_extra(log_type="genesys_send", data={"payload": redact(message)}))
             await self.websocket.send(json.dumps(message))
-        except RuntimeError as e:
-            logger.warning(f"RuntimeError during send to Genesys (connection closing?): {e}", extra=self._get_log_extra(log_type="genesys_send_runtime_error"))
+        except (RuntimeError, websockets.exceptions.ConnectionClosed, WebSocketDisconnect) as e:
+            logger.warning(f"Connection dropped during send to Genesys (client disconnected abruptly): {e}", extra=self._get_log_extra(log_type="genesys_send_dropped"))
         except Exception as e:
             logger.error("Error sending message to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_send_error", data={"payload": redact(message)}))
             raise
