@@ -176,7 +176,9 @@ Follow the steps below to configure the Audio Connector:
       2. Any values added prefixed with an underscore (e.g. `_value`) will be ignored when passing data to CXAS; see table 4.1.2.1 for more details on supported values with prefixed underscore.  
       3. Other suggested, but optional, values that can be passed using the Genesys flow’s String Builder tool (from **Data**) are `Call.Ani` (user’s phone number), `Call.CalledAddressOriginal` (dialed phone number), `Call.ConversationId` (Genesys conversation ID). The **Variable Name** used in this configuration in the Genesys flow will be the key name for the session variable in the CXAS agent. For example, if you pass key `ani` with value of `Call.Ani` then the variable key in CXAS agent context will be **`ani`**.  
    4. Under **Session Variables \- Outputs**, click the plus (**\+**) sign to add variables that will be returned to your flow by CXAS agent `end_session` signal. See section 4.3.4 to identify the key names to add in this configuration.  
-8. Select **Save** and **Publish** your flow.  
+8. If adding a new flow, it may be necessary to attach a **Termination Action** in order for validation to
+   complete. Initially you can use a **Disconnect** action.
+9. Select **Save** and **Publish** your flow.  
  
 
 
@@ -253,7 +255,7 @@ past then you may need to grant an additional permission to prepare:
 
 1. Determine the service account used for Cloud Build, following instructions [here](https://docs.cloud.google.com/build/docs/cloud-build-service-account-updates#get_the_current_default_service_account_for_a_project).
 
-2. Grant the required roles for the service account, following instructions [here]https://docs.cloud.google.com/run/docs/configuring/services/build-service-account#required-roles-for-the-cloud-build-service-account.
+2. Grant the required roles for the service account, following instructions in the section "Click to view required roles for the Cloud Build service account" [here](https://docs.cloud.google.com/run/docs/configuring/services/build-service-account#required-roles-for-the-cloud-build-service-account).
 
 ```shell
 gcloud projects add-iam-policy-binding [PROJECT_ID] \
@@ -352,19 +354,21 @@ bash script/deploy.sh
 
 At the end of this section, you should have your Cloud Run application deployed in two regions (`us-central1` and `us-east4`) with the correct service account, environment variables and secrets mounted.
 
-### 4.2.3.1. Troubleshooting Cloud Run deployment.
+### 4.2.3.1. Troubleshooting Cloud Run deployment
 
 While running the Cloud Run script you may encounter the warning:
 
+```
 Setting IAM policy failed, try "gcloud beta run services add-iam-policy-binding --region=us-central1 --member=allUsers --role=roles/run.invoker ces-genesys-adapter"
+```
 
-The service has been deployed but it is not available to external traffic. It is critical to resolve this otherwise Genesys
-Cloud will be unable to send requests to your connector.
+The service has been deployed but it is not available to external traffic. It is critical to resolve this warning otherwise
+Genesys Cloud will be unable to send requests to your connector.
 
 If you run the suggested command but it does not succeed due to organization policy, you should work with your organization
 administrator to grant an exemption.
 
-### 4.2.3.2 Verify the deployment is accepting traffic.
+### 4.2.3.2 Verify the deployment is accepting traffic
 
 A simple test to ensure the Cloud Run application is available to external traffic, including Genesys Cloud, is to open a browser on a device outside your corporate network and load the following page:
 
