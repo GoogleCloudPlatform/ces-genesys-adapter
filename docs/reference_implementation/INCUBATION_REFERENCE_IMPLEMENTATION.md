@@ -139,12 +139,11 @@ This section describes the necessary steps to configure the Audio Connector inte
 Once the integration is available to your account, follow the steps below to configure the Audio Connector. 
 
 1. Sign into your Genesys Cloud portal  
-2. Select **Collaborate/Communicate**   
-3. Select the **IT and Integrations** menu option  
-4. Select the **Integrations** menu option  
-5. Select **Add integration** and search the integrations for **Audio Connector**  
-6. Select the **Install** option on the **Audio Connector**  
-7. This will open a new configuration interface for a new **Audio Connector**  
+2. Select the **IT and Integrations** menu option  
+3. Select the **Integrations** menu option  
+4. Select **Add integration** and search the integrations for **Audio Connector**  
+5. Select the **Install** option on the **Audio Connector**  
+6. This will open a new configuration interface for a new **Audio Connector**  
    1. Under **Details**, provide an **Integration Name** and any **Notes** (optional)  
    2. Under **Configuration**, select **Properties** and input the **Base Connection URI**  
       1. The **Base Connection URI** is the WebSocket Secure (WSS) URL endpoint that reaches the adapter deployed in the regional Cloud Run instances. In this case, use the Global DNS URL generated in step 4.2.3 to ensure high availability and regional redundancy.  
@@ -153,6 +152,7 @@ Once the integration is available to your account, follow the steps below to con
       1. The **API Key** and **Client Secret** added in this configuration need to be saved in **Secret Manager**.  
          * Note that the value entered for **API Key** needs to pass regular expression: `^[a-zA-Z0-9+/_-]+={0,2}$`  
          * Note that the value entered for **Client Secret** needs to be base64 encoded and must pass `^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{3}=?|[A-Za-z0-9+/]{2}(?:==)?)?$`. An example command to generate this value in your terminal is `openssl rand -base64 32`.
+   5. Click **Save & Activate**.
 
 Once the **Audio Connector** integration is configured, prior to advancing to section 4.1.2, you will need a DID Number available for assignment to the Flow created in the next step.
 
@@ -163,19 +163,20 @@ This section describes the minimum requirements to configure the [Audio Connecto
 Follow the steps below to configure the Audio Connector:
 
 1. Sign into your Genesys Cloud portal  
-2. Select **Architect**  
-3. **Edit** an existing flow (or **Add** a new flow)  
-4. Under **Starting Menu**, from **Actions**, add the **Task action** to the list of options  
-5. Open the newly added **Task action** option under **Starting Menu**, and under **Bot** drag the **Call Audio Connector** option into your flow  
-6. In the settings for **Call Audio Connector**  
-   1. Select the audio connector **Integration Name** you configured in section 4.1.1.7a from the list  
+2. Select **Orchestration**
+3. Select **Architect**  
+4. **Edit** an existing flow (or **Add** a new flow)  
+5. Under **Starting Menu**, from **Actions**, add the **Task action** to the list of options  
+6. Open the newly added **Task action** option under **Starting Menu**, and under **Bot** drag the **Call Audio Connector** option into your flow  
+7. In the settings for **Call Audio Connector**  
+   1. Select the audio connector **Integration Name** you configured in section 4.1.1.6a from the list  
    2. Input a **Connector ID** value (this is used when calling the Cloud Run WSS endpoint)  
    3. Under the **Session Variables \- Inputs**, click the plus (**\+**) sign to add variables from your flow that will be passed to the CXAS agent  
       1. Note that it is **required** to send the Deployment ID path from your CX Agent Studio (CXAS) agent as `_deployment_id` (see in section 4.3.2.7).  
       2. Any values added prefixed with an underscore (e.g. `_value`) will be ignored when passing data to CXAS; see table 4.1.2.1 for more details on supported values with prefixed underscore.  
       3. Other suggested, but optional, values that can be passed using the Genesys flow’s String Builder tool (from **Data**) are `Call.Ani` (user’s phone number), `Call.CalledAddressOriginal` (dialed phone number), `Call.ConversationId` (Genesys conversation ID). The **Variable Name** used in this configuration in the Genesys flow will be the key name for the session variable in the CXAS agent. For example, if you pass key `ani` with value of `Call.Ani` then the variable key in CXAS agent context will be **`ani`**.  
    4. Under **Session Variables \- Outputs**, click the plus (**\+**) sign to add variables that will be returned to your flow by CXAS agent `end_session` signal. See section 4.3.4 to identify the key names to add in this configuration.  
-7. Select **Save** and **Publish** your flow.  
+8. Select **Save** and **Publish** your flow.  
  
 
 
@@ -245,7 +246,22 @@ gcloud secrets add-iam-policy-binding [CLIENT_SECRET_NAME] \
 
 At the end of this section, you will have a service account created with the appropriate permissions configured. You are responsible for ensuring the token in **Secret Manager** is valid and refreshed periodically. The adapter will simply read and use whatever token is stored there.
 
-### 4.2.2. Create and deploy the Cloud Run application
+### 4.2.2. Prepare Cloud Build service account
+
+The deployment of the Cloud Run application relies on a Cloud Build service account. If you haven't used Cloud Run in the
+past then you may need to grant an additional permission to prepare:
+
+1. Determine the service account used for Cloud Build, following instructions [here](https://docs.cloud.google.com/build/docs/cloud-build-service-account-updates#get_the_current_default_service_account_for_a_project).
+
+2. Grant the required roles for the service account, following instructions [here]https://docs.cloud.google.com/run/docs/configuring/services/build-service-account#required-roles-for-the-cloud-build-service-account.
+
+```shell
+gcloud projects add-iam-policy-binding [PROJECT_ID] \
+    --member="serviceAccount:[FULL_CLOUD_BUILD_SERVICE_ACCOUNT_EMAIL]" \
+    --role="roles/run.builder"
+```
+
+### 4.2.3. Create and deploy the Cloud Run application
 
 The Cloud Run application uses open source software published to Google Cloud’s GitHub [here](https://github.com/GoogleCloudPlatform/ces-genesys-adapter). Once you have cloned the open source repository locally, follow the next steps to deploy the software to Cloud Run:
 
@@ -336,7 +352,27 @@ bash script/deploy.sh
 
 At the end of this section, you should have your Cloud Run application deployed in two regions (`us-central1` and `us-east4`) with the correct service account, environment variables and secrets mounted.
 
-### 4.2.3. Set up Cloud DNS
+### 4.2.3.1. Troubleshooting Cloud Run deployment.
+
+While running the Cloud Run script you may encounter the warning:
+
+Setting IAM policy failed, try "gcloud beta run services add-iam-policy-binding --region=us-central1 --member=allUsers --role=roles/run.invoker ces-genesys-adapter"
+
+The service has been deployed but it is not available to external traffic. It is critical to resolve this otherwise Genesys
+Cloud will be unable to send requests to your connector.
+
+If you run the suggested command but it does not succeed due to organization policy, you should work with your organization
+administrator to grant an exemption.
+
+### 4.2.3.2 Verify the deployment is accepting traffic.
+
+A simple test to ensure the Cloud Run application is available to external traffic, including Genesys Cloud, is to open a browser on a device outside your corporate network and load the following page:
+
+https://ces-genesys-adapter-[PROJECT_ID].us-central1.run.app/health
+
+It should render a simple page with the text "OK".
+
+### 4.2.4. Set up Cloud DNS
 
 This reference implementation utilizes a custom domain to provide a stable, global entry point for Genesys Cloud. This decouples the Genesys configuration from specific regional Cloud Run URLs.
 
@@ -389,7 +425,7 @@ gcloud dns record-sets transaction execute --zone="[ZONE_NAME]"
 
 **Note:** Replace `[SUBDOMAIN]` with your chosen prefix (e.g., `audiohook`).
 
-### 4.2.4. Set up External Application Load Balancer
+### 4.2.5. Set up External Application Load Balancer
 
 The Load Balancer distributes incoming WebSocket traffic across the deployed Cloud Run regions using [Serverless Network Endpoint Groups (NEGs)](https://docs.cloud.google.com/load-balancing/docs/negs/serverless-neg-concepts).
 
@@ -411,7 +447,7 @@ gcloud compute network-endpoint-groups create [NEG_NAME_REGION2] \
 
 **Note:** Replace `[NEG_NAME_REGION1]` and `[NEG_NAME_REGION2]` with descriptive names (e.g., `neg-central1`, `neg-east4`), `[REGION1/2]` with your GCP regions, and `[SERVICE_NAME]` with your Cloud Run service name (e.g., `ces-genesys-adapter`).
 
-### 4.2.5. Configure the backend service
+### 4.2.6. Configure the backend service
 
 The Backend Service defines how the Load Balancer distributes traffic to the NEGs created in the previous step.
 
@@ -467,7 +503,7 @@ gcloud compute backend-services update [BACKEND_SERVICE_NAME] \
 
 The Load Balancer's health check should be configured as an HTTP check polling the `/health` path. This SRE path is now natively supported alongside the WS traffic on port 8080 in the container and evaluates robust, container-local conditions and downstream latency ceilings. Ensure this health check is created and attached to the Backend Service.
 
-### 4.2.6. Set up Frontend & SSL
+### 4.2.7. Set up Frontend & SSL
 
 This final step configures the public-facing components: the URL map, the SSL certificate, and the forwarding rule that binds the IP address to your service.
 
@@ -555,7 +591,7 @@ gcloud run services add-iam-policy-binding [SERVICE_NAME] \
     --role="roles/run.invoker"
 ```
 
-### 4.2.7. Troubleshooting GCP components
+### 4.2.8. Troubleshooting GCP components
 
 This section describes the logs available for troubleshooting the GCP components in the reference implementation.
 
@@ -771,8 +807,8 @@ The adapter code supports various features of CXAS as it relates to the end-user
 | :---- | :---- | :---- |
 | Barge-in / user interruptions | Enable in Agent application’s Settings, see documentation [here](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/agent#agent-application-settings) | Yes |
 | Session input: DTMF | Requires **customize\_response** [system tool](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/tool/system) added in the agent | Yes |
-| Session input: Variables | See sections 4.1.2.6.c and 4.3.3 | Yes |
-| End session metadata | See sections 4.1.2.6.d and 4.3.4; requires **end\_session** [system tool](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/tool/system) added in the agent | Yes |
+| Session input: Variables | See sections 4.1.2.7.c and 4.3.3 | Yes |
+| End session metadata | See sections 4.1.2.7.d and 4.3.4; requires **end\_session** [system tool](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/tool/system) added in the agent | Yes |
 | Ambient sounds | Not recommended with adapter | Partial (not recommended) |
 | Event input(s) | [CES API specification supports events input](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/reference/rpc/google.cloud.ces.v1#event) | No, however can consider adding if there are relevant user experience events to process from [AudioHook protocol](https://developer.genesys.cloud/devapps/audiohook/protocol-reference#event-entity-types) to pass to CXAS agent. |
 
@@ -795,11 +831,11 @@ To create the deployment channel:
 7. Copy the **Deployment ID** path from the **Channel created** confirmation modal  
    1. The complete path of the deployment id is structured as: `projects/YOUR_PROJECT_ID/locations/REGION/apps/APP_ID/deployments/DEPLOYMENT_ID`
 
-The complete path needs to be saved as the value for the `_deployment_id` input variable configured in section 4.1.2.6.c. Note that you do not need to create a new deployment channel each time you update your agent, instead you can simply create a new version under your deployment ID configured by repeating step 5b above and selecting **Save**. This will ensure you can continue to use the deployment ID value you’ve configured in the Genesys flow.
+The complete path needs to be saved as the value for the `_deployment_id` input variable configured in section 4.1.2.7.c. Note that you do not need to create a new deployment channel each time you update your agent, instead you can simply create a new version under your deployment ID configured by repeating step 5b above and selecting **Save**. This will ensure you can continue to use the deployment ID value you’ve configured in the Genesys flow.
 
 ### 4.3.3. Mapping input variables from Genesys
 
-In section 4.1.2.6.c, you configured in the Audio Connector a set of optional input variables to pass into the CXAS agent at runtime. This section describes how to configure the CXAS agent to consume the variables being passed.
+In section 4.1.2.7.c, you configured in the Audio Connector a set of optional input variables to pass into the CXAS agent at runtime. This section describes how to configure the CXAS agent to consume the variables being passed.
 
 If you are passing variables through the Audio Connector, they will need to be added in the CXAS agent’s [Variables](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/variable) configuration. The key from Genesys input variables also needs to match the **Variable Name** in CXAS; note this is case sensitive. The **Variable Type** needs to match the data type that is being sent by Audio Connector. For example, if a phone number is passed in e164 format then it would be a **string** value which maps the **Text** type in CXAS. 
 
@@ -813,7 +849,7 @@ In the reference implementation, the audio connector input variables used are:
 
 ### 4.3.4. Generating metadata that maps to output variables in Genesys
 
-In section 4.1.2.6.d, you configured in the Audio Connector a set of expected output variables to be returned to the flow when the CXAS agent calls the `end_session` [system tool](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/tool/system). 
+In section 4.1.2.7.d, you configured in the Audio Connector a set of expected output variables to be returned to the flow when the CXAS agent calls the `end_session` [system tool](https://docs.cloud.google.com/customer-engagement-ai/conversational-agents/ps/tool/system). 
 
 In order to generate the metadata associated with the `end_session` tool call, and subsequent API event, you must construct a `params` object prior to calling the `end_session` system tool.
 
