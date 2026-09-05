@@ -1,13 +1,21 @@
 # Python
 __pycache__/
-.venv
+*.py[cod]
+.venv/
+.pytest_cache/
 
-# Custom
-.env
-script/deploy-renibot.sh
-script/values-renibot.sh
+# Environment and Secrets
+.env*
+*.env
+
+# Logs
+*.log
+
+# Deployment and Configuration Scripts
 script/values.sh
-script/values-pakminw.sh
-script/deploy-pakminw.sh
-tmp
+script/values-*.sh
+!script/values.sh.example
+script/deploy-*.sh
+tmp/
 tests
+

@@ -26,7 +26,6 @@ from google.auth.transport import requests as google_auth_requests
 from google.cloud import secretmanager
 
 from . import config
-from .redaction import redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +35,8 @@ class Auth:
         self._token_info = {}
         self._lock = asyncio.Lock()
         self._sm_client = None
+        self._adc_creds = None
+        self._adc_req = None
 
     async def get_token(self):
         async with self._lock:
@@ -48,11 +49,14 @@ class Auth:
                 return self._token_info["access_token"]
             else:
                 # ADC-based auth
-                creds, _ = google.auth.default()
-                auth_req = google_auth_requests.Request()
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, lambda: creds.refresh(auth_req))
-                return creds.token
+                if self._adc_creds is None:
+                    self._adc_creds, _ = google.auth.default()
+                    self._adc_req = google_auth_requests.Request()
+                    
+                if not self._adc_creds.valid:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, lambda: self._adc_creds.refresh(self._adc_req))
+                return self._adc_creds.token
 
     async def _fetch_token_from_secret_manager(self):
         if not self._sm_client:
@@ -98,11 +102,11 @@ class Auth:
         headers = request.headers
         # API Key Verification
         received_api_key = headers.get("x-api-key", "")
-        logger.info(f"Received x-api-key: '{redact_value(received_api_key)}'")
-        logger.info(f"Expected API key: '{redact_value(config.GENESYS_API_KEY)}'")
         
         # Guard against None in config.GENESYS_API_KEY for robust typing
         expected_key = config.GENESYS_API_KEY or ""
+        
+        logger.info(f"API key verification: received_length={len(received_api_key)}, expected_length={len(expected_key)}")
         
         if not hmac.compare_digest(received_api_key, expected_key):
             logger.warning("API key verification failed.")
@@ -112,7 +116,7 @@ class Auth:
         if config.GENESYS_CLIENT_SECRET:
             try:
                 client_secret = config.GENESYS_CLIENT_SECRET.strip()
-                logger.info(f"Using GENESYS_CLIENT_SECRET: '{redact_value(client_secret)}'")
+                logger.info(f"Verifying signature with GENESYS_CLIENT_SECRET (length={len(client_secret)})")
                 secret = base64.b64decode(client_secret)
 
                 signature_header = headers.get("Signature", "")

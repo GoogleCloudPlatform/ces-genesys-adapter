@@ -20,7 +20,7 @@ import sys
 from typing import Optional
 import uuid
 
-from fastapi import FastAPI, Query, WebSocket, status
+from fastapi import FastAPI, WebSocket, status
 from fastapi.responses import JSONResponse
 import uvicorn
 import websockets
@@ -184,32 +184,10 @@ async def readiness_check():
     )
 
 
-# 2. WebSocket Upgrade Endpoints
-@app.websocket("/aai-ces-connector-1")
-@app.websocket("/audiohook")
-@app.websocket("/")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    conversationId: Optional[str] = Query(None),
-    _deployment_id: Optional[str] = Query(None),
-    _agent_id: Optional[str] = Query(None),
-):
-    # Validation 1: Verify deployment or agent ID present -> 400 Bad Request / WS 1008
-    if websocket.query_params and not conversationId:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Missing mandatory conversationId parameter",
-        )
-        return
+@app.websocket("/{path:path}")
+async def websocket_endpoint(websocket: WebSocket):
 
-    if websocket.query_params and (not _deployment_id and not _agent_id):
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Missing deployment or agent ID",
-        )
-        return
-
-    # Validation 2: Check Container Draining / Auth Health -> 503 Service Unavailable / WS 1013
+    # Validation 1: Check Container Draining / Auth Health -> 503 Service Unavailable / WS 1013
     if health_checker.is_draining or not await health_checker.check_auth_health():
         await websocket.close(
             code=status.WS_1013_TRY_AGAIN_LATER,
@@ -217,8 +195,12 @@ async def websocket_endpoint(
         )
         return
 
-    # Validation 3: Verify Request Signatures / API Key -> 401 Unauthorized / WS 1008
+    # Validation 2: Verify Request Signatures / API Key -> 401 Unauthorized / WS 1008
     if not auth_provider.verify_fastapi_request(websocket):
+        logger.warning(
+            "WebSocket connection rejected: invalid API key or signature.",
+            extra={"log_type": "auth_error"}
+        )
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="Unauthorized",

@@ -57,7 +57,7 @@ class CESWS:
         extra = {
             "log_type": log_type,
             "adapter_session_id": self.adapter_session_id,
-            "genesys_conv_id": self.genesys_ws.conversation_id,
+            "genesys_conv_id": self.genesys_ws.conversation_id if self.genesys_ws else None,
             "ces_session_id": self.session_id,
         }
         # The IDs are now added directly, no need to call genesys_ws._get_log_extra
@@ -89,7 +89,7 @@ class CESWS:
             token = await auth_provider.get_token()
             ws_url = f"{_BASE_WS_URL}{location}"
 
-            logger.info("Connecting to CES", extra=self._get_log_extra(log_type="ces_connect", data={"url": ws_url}))
+            logger.info(f"Connecting to CES with session ID: {self.session_id}", extra=self._get_log_extra(log_type="ces_connect", data={"url": ws_url}))
             self.websocket = await websockets.connect(
                 ws_url,
                 additional_headers={
@@ -99,7 +99,7 @@ class CESWS:
                 max_size=4 * 1024 * 1024,  # Increase limit to 4MiB to prevent message size errors
                 open_timeout=30            # Increase to 30s to survive burst network delays
             )
-            logger.info("Connected to CES", extra=self._get_log_extra(log_type="ces_connect"))
+            logger.info(f"Connected to CES with session ID: {self.session_id}", extra=self._get_log_extra(log_type="ces_connect"))
             await self.send_config_message(rehydration_payload=rehydration_payload)
             return True
         except Exception as e:
@@ -244,16 +244,7 @@ class CESWS:
         else:
             logger.warning("Cannot send event, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_event_skip"))
 
-    async def send_client_half_close(self):
-        if self.half_closed:
-            return
-        logger.info("Sending clientHalfClose to CES", extra=self._get_log_extra(log_type="ces_send_half_close"))
-        if self.is_connected():
-            try:
-                await self.websocket.send(json.dumps({"clientHalfClose": True}))
-                self.half_closed = True
-            except Exception as e:
-                logger.error("Failed to send clientHalfClose", exc_info=True, extra=self._get_log_extra(log_type="ces_half_close_error"))
+
 
     async def stop_audio(self):
         logger.info("Stopping audio pacer and clearing queues", extra=self._get_log_extra(log_type="ces_pacer_stop"))
@@ -366,6 +357,14 @@ class CESWS:
         
         logger.info(f"Reconnected and flushed {flushed_chunks} audio chunks", extra=self._get_log_extra(log_type="ces_reconnect_success"))
 
+    async def send_client_half_close(self):
+        if self.is_connected():
+            logger.info("Sending clientHalfClose to CES", extra=self._get_log_extra(log_type="ces_send_halfclose"))
+            try:
+                await self.websocket.send(json.dumps({"clientHalfClose": True}))
+            except Exception as e:
+                logger.error(f"Error sending clientHalfClose: {e}", extra=self._get_log_extra(log_type="ces_halfclose_error"))
+
     async def listen(self):
         while self.is_connected():
             try:
@@ -427,11 +426,12 @@ class CESWS:
                     self.endsession_received = True
                     metadata = data.get("endSession", {}).get("metadata", {})
                     params = metadata.get("params")
-                    if not self.genesys_ws.disconnect_initiated:
+                    if self.genesys_ws and not self.genesys_ws.disconnect_initiated:
                         # Save params for finalization after loop
                         self.final_params = params if params else {}
                         logger.info("CES endSession: Waiting for final audio...", extra=self._get_log_extra(log_type="ces_endsession_wait_audio"))
-                    self.genesys_ws.ces_data_received.set()
+                    if self.genesys_ws:
+                        self.genesys_ws.ces_data_received.set()
 
                 elif "goAway" in data:
                     logger.info("Received goAway from CES (approaching session limit)", extra=self._get_log_extra(log_type="ces_recv_goaway", data={"data": data}))
@@ -447,18 +447,25 @@ class CESWS:
                 else:
                     logger.warning("Received unhandled message from CES", extra=self._get_log_extra(log_type="ces_recv_unhandled", data={"data": redact(data)}))
             except websockets.exceptions.ConnectionClosed as e:
-                if self.genesys_ws.disconnect_initiated or e.code in (1000, 1001):
+                is_clean_disconnect = False
+                if self.genesys_ws and self.genesys_ws.disconnect_initiated:
+                    is_clean_disconnect = True
+                
+                if is_clean_disconnect or e.code in (1000, 1001, 1007):
                     logger.info("CES WS connection closed cleanly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
                 else:
                     logger.warning("CES WS connection closed unexpectedly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
-                    await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
-                self.genesys_ws.ces_data_received.set()
+                    if self.genesys_ws:
+                        await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
+                if self.genesys_ws:
+                    self.genesys_ws.ces_data_received.set()
                 break
             except Exception as e:
                 logger.error("Error in CES listener", extra=self._get_log_extra(log_type="ces_listener_error"), exc_info=True)
-                if not self.genesys_ws.disconnect_initiated:
+                if self.genesys_ws and not self.genesys_ws.disconnect_initiated:
                     await self.genesys_ws.send_disconnect("error", info=f"CES Listen Error: {e}")
-                self.genesys_ws.ces_data_received.set()
+                if self.genesys_ws:
+                    self.genesys_ws.ces_data_received.set()
                 break
                 
         # Loop exited (either by timeout or connection closed)
@@ -472,7 +479,7 @@ class CESWS:
 
         await self.close()
 
-        if getattr(self, "endsession_received", False) and not getattr(self.genesys_ws, "disconnect_initiated", False):
+        if self.genesys_ws and getattr(self, "endsession_received", False) and not getattr(self.genesys_ws, "disconnect_initiated", False):
             await self.genesys_ws.send_disconnect("completed", info="Session has ended successfully in CES", output_variables=self.final_params)
 
     async def pacer(self):
@@ -512,11 +519,10 @@ class CESWS:
                 time_since_last_send = current_time - last_send_time
 
                 if self.pacer_send_buffer and time_since_last_send >= MIN_INTERVAL:
-                    if not self.genesys_ws.websocket or self.genesys_ws.websocket.state == State.CLOSED:
-                        logger.warning("Genesys WS closed, clearing send buffer", extra=self._get_log_extra(log_type="ces_pacer_discard"))
+                    if not self.genesys_ws or not self.genesys_ws.websocket or self.genesys_ws.websocket.state == State.CLOSED:
+                        logger.warning("Genesys WS unavailable or closed, breaking pacer loop", extra=self._get_log_extra(log_type="ces_pacer_discard"))
                         self.pacer_send_buffer.clear()
-                        primed = False
-                        continue
+                        break
 
                     is_priming_send = False
                     if not primed:
@@ -532,10 +538,12 @@ class CESWS:
                         chunk_size = min(chunk_size, MAX_GENESYS_CHUNK_SIZE)
 
                     if chunk_size > 0:
-                        if chunk_size < 320 and not getattr(self, "endsession_received", False):
-                            # Chunk too small, yield to prevent AudioHook-0012 tiny-frame spam
-                            await asyncio.sleep(0.01)
-                            continue
+                        if chunk_size < 160 and not getattr(self, "endsession_received", False):
+                            # Chunk too small, attempt to yield to prevent tiny-frame spam.
+                            # But if we've waited too long without new audio (e.g. end of utterance), flush it.
+                            if time_since_last_send < MIN_INTERVAL * 2:
+                                await asyncio.sleep(0.01)
+                                continue
 
                         chunk_to_send = bytes(self.pacer_send_buffer[:chunk_size])
                         try:
@@ -566,7 +574,7 @@ class CESWS:
             logger.info("Genesys websocket connection closed, pacer stopped", extra=self._get_log_extra(log_type="ces_pacer_connection_closed"))
         except Exception as e:
             logger.error("Unexpected error in pacer", extra=self._get_log_extra(log_type="ces_pacer_error"), exc_info=True)
-            if not self.genesys_ws.disconnect_initiated:
+            if self.genesys_ws and getattr(self.genesys_ws, "disconnect_initiated", False) is False:
                  await self.genesys_ws.send_disconnect("error", info=f"Pacer Error: {e}")
         logger.info("Audio pacer for Genesys stopped", extra=self._get_log_extra(log_type="ces_pacer_stopped"))
 
@@ -594,7 +602,6 @@ class CESWS:
                 pass
 
         if self.is_connected():
-            await self.send_client_half_close()
             logger.info("Closing WebSocket connection to CES", extra=self._get_log_extra(log_type="ces_close"))
             await self.websocket.close()
         else:
