@@ -451,12 +451,17 @@ class CESWS:
                 if self.genesys_ws and self.genesys_ws.disconnect_initiated:
                     is_clean_disconnect = True
                 
-                if is_clean_disconnect or e.code in (1000, 1001, 1007):
+                if is_clean_disconnect or e.code in (1000, 1001):
                     logger.info("CES WS connection closed cleanly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
                 else:
                     logger.warning("CES WS connection closed unexpectedly", extra=self._get_log_extra(log_type="ces_connection_closed", data={"code": e.code, "reason": e.reason, "exc": str(e)}))
                     if self.genesys_ws:
-                        await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
+                        if e.code == 1011 and "resource_exhausted" in e.reason.lower():
+                            await self.genesys_ws.send_disconnect("normal", output_variables={"SYS_ERROR": "CES_RESOURCE_EXHAUSTED"})
+                        elif e.code == 1007:
+                            await self.genesys_ws.send_disconnect("normal", output_variables={"SYS_ERROR": "CES_UNSUPPORTED_PAYLOAD"})
+                        else:
+                            await self.genesys_ws.send_disconnect("error", info=f"CES WS Closed: {e.code}")
                 if self.genesys_ws:
                     self.genesys_ws.ces_data_received.set()
                 break
