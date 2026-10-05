@@ -217,6 +217,8 @@ This data can then be used in your Genesys Architect flow for routing decisions,
 *   **Structured JSON Logging**: Implemented `logging_utils.py` for structured Cloud Logging, enriching logs with session IDs and other context.
 *   **Dynamic Initial Message**: Added support for `_initial_message` in input variables, allowing the custom configuration of the conversation kickstart message (defaulting to "Hello").
 *   **Custom Session ID**: Added support for `_session_id` in input variables, enabling the caller to provide a custom session ID for the CES conversation.
+*   **FastAPI & Uvicorn Migration**: Upgraded the core web server to FastAPI to provide integrated API routing and more durable websocket scaling.
+*   **HTTP Readiness Probes**: Implemented a standalone `/health` HTTP endpoint to seamlessly support Google Cloud Load Balancer readiness checks.
 
 ### Hybrid Secret Management
 

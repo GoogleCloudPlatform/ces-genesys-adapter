@@ -56,7 +56,9 @@ do
   GCLOUD_CMD+=(--project="$PROJECT_ID")
   GCLOUD_CMD+=(--timeout="$TIMEOUT")
   GCLOUD_CMD+=(--concurrency="$CONCURRENCY")
-  GCLOUD_CMD+=(--startup-probe="httpGet.path=/health,httpGet.port=8080")
+  GCLOUD_CMD+=(--startup-probe="httpGet.path=/health/liveness,httpGet.port=8080")
+  GCLOUD_CMD+=(--liveness-probe="httpGet.path=/health/liveness,httpGet.port=8080")
+  GCLOUD_CMD+=(--readiness-probe="httpGet.path=/health/readiness,httpGet.port=8080")
 
   if [ ${#ENV_VARS_LIST[@]} -gt 0 ]; then
     ENV_VARS=$(IFS=,; echo "${ENV_VARS_LIST[*]}")
