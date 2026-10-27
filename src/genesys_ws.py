@@ -31,7 +31,7 @@ from starlette.websockets import WebSocketDisconnect
 from .ces_ws import CESWS
 from .redaction import redact, redact_value
 from websockets.protocol import State
-from .config import LOG_UNREDACTED_DATA, DISCONNECT_EVENT_NAME
+from .config import LOG_UNREDACTED_DATA, DISCONNECT_EVENT_NAME, FORCE_ADAPTER_SESSION_ID
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ class GenesysWS:
                             except json.JSONDecodeError:
                                 logger.warning(f"Failed to JSON decode _initial_message: {self.input_variables['_initial_message']}", exc_info=True, extra=self._get_log_extra(log_type="genesys_config_warning"))
                                 self.initial_message = self.input_variables["_initial_message"] # Fallback to using the raw string
-                        if "_session_id" in self.input_variables:
+                        if "_session_id" in self.input_variables and not FORCE_ADAPTER_SESSION_ID:
                             self.session_id = self.input_variables["_session_id"]
                             self.conversation_id = self.session_id # Override Genesys conversation ID for logging correlation
 
@@ -175,7 +175,9 @@ class GenesysWS:
                         }
                         self.ces_input_variables["adapterSessionId"] = self.adapter_session_id
                     
-                    if not self.session_id:
+                    if FORCE_ADAPTER_SESSION_ID:
+                        self.session_id = self.adapter_session_id
+                    elif not self.session_id:
                         if self.conversation_id:
                             self.session_id = self.conversation_id
                         else:

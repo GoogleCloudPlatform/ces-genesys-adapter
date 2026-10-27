@@ -102,6 +102,7 @@ Open `script/values.sh` in a text editor and fill in the required values. Key va
 *   `GENESYS_CLIENT_SECRET_PATH`: The full resource path to the Secret Manager secret containing the client secret for request signature verification. **Note: The client secret value must be base-64 encoded.**
 *   `LOG_UNREDACTED_DATA`: Set to `true` to log unredacted data from Genesys and CES. Otherwise, sensitive information will be redacted (e.g., `<REDACTED>`). Defaults to `false`.
     **Caution**: This option should typically only be used for local development and debugging purposes. Avoid enabling it in production environments to prevent exposure of sensitive data.
+*   `FORCE_ADAPTER_SESSION_ID`: (Optional) Set to `true` to force the adapter to always use its internally generated `adapter_session_id` UUID as the CES session ID, ignoring any Genesys `conversationId` or `_session_id`. Defaults to `false`.
 
 **Note on Agent and Deployment IDs**: You must pass either an agent ID or a deployment ID within the `inputVariables` of the Genesys "open" message.
 *   `_agent_id`: The full agent ID.
