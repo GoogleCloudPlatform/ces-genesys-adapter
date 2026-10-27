@@ -48,5 +48,18 @@ export GENESYS_CLIENT_SECRET_PATH="your-genesys-client-secret-name"
 # 2. Local JSON file (for development/testing)
 NUMBERS_CONFIG_FILE="number_mappings.json"
 LOG_UNREDACTED_DATA="false"
+LOG_LEVEL="INFO"
 DEBUG_WEBSOCKETS="false"
 DISCONNECT_EVENT_NAME="sys.remote-call-disconnected"
+
+# HEALTH PROBE CONFIGURATION (SRE Active Probes)
+HEALTH_WINDOW_SECONDS="60"
+HEALTH_MIN_SAMPLES="15"
+MAX_CES_ERROR_RATE_PCT="25.0"
+MAX_CES_AVG_LATENCY_MS="1500.0"
+MAX_EVENT_LOOP_LAG_MS="500.0"
+
+# SESSION CONFIGURATION
+# Set to "true" to force the adapter to always use its internally generated
+# adapter_session_id UUID as the downstream CES session ID.
+FORCE_ADAPTER_SESSION_ID="false"
