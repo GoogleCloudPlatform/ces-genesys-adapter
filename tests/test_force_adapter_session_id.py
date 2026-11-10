@@ -167,6 +167,56 @@ class StartValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.initial_message, "hello there")
 
 
+class OpenRetryTest(unittest.IsolatedAsyncioTestCase):
+
+    async def _start_with_failures(self, *failures: Exception):
+        session, genesys, backend = _make_session("adapter-uuid-1")
+        backend.open.side_effect = [*failures, None]
+        with (
+            mock.patch.object(call_session, "OPEN_RETRY_BACKOFFS_S", (0, 0)),
+            mock.patch.object(call_session.health, "health_checker") as checker,
+        ):
+            started = await session.start({"_agent_id": _AGENT_ID}, "conv")
+        await session.close()
+        return started, genesys, backend, checker
+
+    async def test_transient_failures_are_retried(self):
+        transient = base.BackendOpenError("503", retryable=True)
+
+        started, _, backend, checker = await self._start_with_failures(
+            transient, transient
+        )
+
+        self.assertTrue(started)
+        self.assertEqual(backend.open.await_count, 3)
+        error_flags = [
+            call.kwargs.get("is_error", False)
+            for call in checker.record_ces_event.call_args_list
+        ]
+        self.assertEqual(error_flags, [True, True, False])
+
+    async def test_permanent_failure_fails_fast(self):
+        started, genesys, backend, _ = await self._start_with_failures(
+            base.BackendOpenError("403 Forbidden")
+        )
+
+        self.assertFalse(started)
+        self.assertEqual(backend.open.await_count, 1)
+        genesys.send_disconnect.assert_awaited_once_with(
+            "error", info="CES Connection/Config Error: 403 Forbidden"
+        )
+
+    async def test_retries_stop_after_two(self):
+        transient = base.BackendOpenError("503", retryable=True)
+
+        started, _, backend, _ = await self._start_with_failures(
+            transient, transient, transient
+        )
+
+        self.assertFalse(started)
+        self.assertEqual(backend.open.await_count, 3)
+
+
 class AgentIdFromDeploymentTest(unittest.TestCase):
 
     def test_valid_deployment(self):

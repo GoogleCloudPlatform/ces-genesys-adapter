@@ -58,6 +58,22 @@ def close_sys_error(code: int, reason: str) -> str | None:
     return None
 
 
+def is_transient_open_error(err: Exception) -> bool:
+    """Returns whether a connect or setup failure is worth retrying.
+
+    Transient: timeouts, network errors and HTTP 5xx during the handshake.
+    Everything else (HTTP 4xx, protocol errors) fails fast.
+
+    Args:
+      err: The exception raised while opening the session.
+    """
+    if isinstance(err, websockets.exceptions.InvalidStatus):
+        return err.response.status_code >= 500
+    if isinstance(err, websockets.exceptions.ConnectionClosed):
+        return False
+    return isinstance(err, (TimeoutError, OSError))
+
+
 def location_from_agent_id(agent_id: str) -> str | None:
     """Extracts the location from an agent resource name.
 
@@ -143,7 +159,20 @@ class CesWebSocketBackend:
                 exc_info=True,
                 extra=self._log_extra("ces_connect_error", None),
             )
-            raise base.BackendOpenError(str(err)) from err
+            await self._discard_websocket()
+            raise base.BackendOpenError(
+                str(err), retryable=is_transient_open_error(err)
+            ) from err
+
+    async def _discard_websocket(self) -> None:
+        """Closes a half-set-up socket so a retry starts clean."""
+        if self._websocket is None:
+            return
+        try:
+            await self._websocket.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # Best effort; the socket is being abandoned.
+        self._websocket = None
 
     async def _connect(self, location: str) -> None:
         project_id = await auth.auth_provider.get_project_id()
@@ -475,7 +504,8 @@ class CesWebSocketBackend:
         if "recognitionResult" in data:
             return None
         if session_output is not None:
-            logger.info(
+            # DEBUG: these can carry large diagnosticInfo payloads (TC-4.4).
+            logger.debug(
                 "Received sessionOutput from CES",
                 extra=self._log_extra(
                     "ces_recv_sessionoutput", {"data": redaction.redact(data)}

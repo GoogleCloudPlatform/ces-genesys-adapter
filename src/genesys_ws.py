@@ -63,19 +63,38 @@ def _close_code_and_reason(
 
 def select_media(
     offered_media: list[Mapping[str, Any]],
-) -> Mapping[str, Any] | None:
-    """Returns the first offered PCMU 8 kHz audio media, if any.
+) -> dict[str, Any] | None:
+    """Chooses the media to accept from a Genesys `open` offer (TC-3.5).
+
+    Follows the rule Google's production Genesys channel uses: take the
+    first PCMU offer whose rate is missing or 8000, and accept a single
+    channel, `external` if offered, else the first non-empty channel, else
+    `external`. The backends are mono, so stereo is never echoed back.
 
     Args:
       offered_media: `parameters.media` from the Genesys `open` message.
+
+    Returns:
+      The media entry to echo in `opened`, or None if nothing is usable.
     """
     for media in offered_media:
-        if (
-            media.get("type") == "audio"
-            and media.get("format") == "PCMU"
-            and media.get("rate") == 8000
-        ):
-            return media
+        if media.get("format") != "PCMU":
+            continue
+        if media.get("rate", 8000) != 8000:
+            continue
+        if media.get("type", "audio") != "audio":
+            continue
+        channels = [c for c in media.get("channels") or [] if c]
+        if "external" in channels or not channels:
+            channel = "external"
+        else:
+            channel = channels[0]
+        return {
+            "type": "audio",
+            "format": "PCMU",
+            "channels": [channel],
+            "rate": 8000,
+        }
     return None
 
 
@@ -248,6 +267,10 @@ class GenesysWS:
                     f"genesys_recv_{message_type}", {"data": data}
                 ),
             )
+            if message_type == "playback_completed":
+                self.call.on_playback_completed()
+        elif message_type in ("paused", "resumed", "discarded"):
+            await self._on_pause_state(message_type, data)
         elif message_type == "dtmf":
             await self._on_dtmf(data)
         elif message_type == "close":
@@ -265,6 +288,21 @@ class GenesysWS:
                     {"message_type": message_type, "data": data},
                 ),
             )
+
+    async def _on_pause_state(
+        self, message_type: str, data: Mapping[str, Any]
+    ) -> None:
+        logger.info(
+            "Received '%s' message from Genesys",
+            message_type,
+            extra=self._log_extra(
+                f"genesys_recv_{message_type}", {"data": data}
+            ),
+        )
+        if message_type == "paused":
+            self.call.pause()
+        elif message_type == "resumed":
+            await self.call.resume()
 
     def _reply(
         self, message_type: str, parameters: Mapping[str, Any] | None = None
@@ -299,7 +337,15 @@ class GenesysWS:
                 "Genesys session opened", extra=self._log_extra("genesys_open")
             )
         self._log_custom_config(parameters.get("customConfig"))
-        selected_media = select_media(parameters.get("media", []))
+        offered_media = parameters.get("media") or []
+        selected_media = select_media(offered_media)
+        logger.info(
+            "Genesys media offer",
+            extra=self._log_extra(
+                "genesys_media_offer",
+                {"offered_media": offered_media, "selected": selected_media},
+            ),
+        )
         if not selected_media:
             await self.send_disconnect(
                 "error", "No compatible audio media offered."
@@ -380,6 +426,8 @@ class GenesysWS:
             "Received 'close' message from Genesys",
             extra=self._log_extra("genesys_recv_closed"),
         )
+        # No audio may follow `closed` (TC-7.2).
+        await self.call.stop_audio()
         if self.disconnect_initiated:
             logger.info(
                 "Disconnect already initiated by adapter, sending 'closed'"
@@ -402,14 +450,14 @@ class GenesysWS:
 
     async def send_disconnect(
         self,
-        reason: str = "normal",
+        reason: str = "completed",
         info: str | None = None,
         output_variables: Mapping[str, Any] | None = None,
     ) -> None:
         """Stops the call and sends an AudioHook `disconnect` message.
 
         Args:
-          reason: Disconnect reason.
+          reason: `completed`, `error` or `unauthorized`.
           info: Optional detail for `error` disconnects.
           output_variables: Variables returned to Genesys; non-string values
             are JSON-encoded.
@@ -498,6 +546,21 @@ class GenesysWS:
           chunk: PCMU audio at 8 kHz.
         """
         await self.websocket.send(chunk)
+
+    async def send_barge_in(self) -> None:
+        """Sends the AudioHook `barge_in` event (TC-5.1).
+
+        Genesys then discards the agent audio it has buffered; clearing the
+        pacer alone leaves up to about 780 ms of stale audio playing.
+        """
+        event = self._reply(
+            "event", {"entities": [{"type": "barge_in", "data": {}}]}
+        )
+        logger.info(
+            "Sending barge_in event to Genesys",
+            extra=self._log_extra("genesys_send_barge_in"),
+        )
+        await self.send_message(event)
 
     def audio_sink_open(self) -> bool:
         """Returns whether audio can still be sent to Genesys."""

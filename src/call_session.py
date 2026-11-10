@@ -26,6 +26,7 @@ import json
 import logging
 from typing import Any, Protocol
 
+from src import health
 from src import pacer
 from src import redaction
 from src import settings
@@ -34,10 +35,17 @@ from src.backends import factory
 
 logger = logging.getLogger(__name__)
 
-# How long to keep reading after the agent ends the session.
-POST_END_SESSION_RECV_TIMEOUT_S = 5.0
 # How long a caller hang-up waits for the backend to finish its turn.
 HANGUP_WRAPUP_TIMEOUT_S = 5.0
+# Longest wait for agent audio to finish playing before `disconnect`.
+PLAYBACK_DRAIN_CAP_S = 1.5
+# Backoff before each retry of a transient open failure, and the total time
+# budget for opening (Genesys is waiting for `opened`).
+OPEN_RETRY_BACKOFFS_S = (0.25, 0.5)
+OPEN_RETRY_BUDGET_S = 3.0
+# 20 ms of PCMU silence, sent to the backend while Genesys is paused.
+SILENCE_FRAME = b"\xff" * 160
+SILENCE_FRAME_S = 0.02
 _HANGUP_SETTLE_S = 0.5
 _ROLLOVER_DRAIN_S = 0.5
 _REHYDRATION_PAYLOAD = '{"reconnected": true}'
@@ -54,7 +62,7 @@ class GenesysLink(Protocol):
 
     async def send_disconnect(
         self,
-        reason: str = "normal",
+        reason: str = "completed",
         info: str | None = None,
         output_variables: Mapping[str, Any] | None = None,
     ) -> None:
@@ -71,6 +79,9 @@ class GenesysLink(Protocol):
 
     async def send_audio(self, chunk: bytes) -> None:
         """Sends one binary audio frame to Genesys."""
+
+    async def send_barge_in(self) -> None:
+        """Tells Genesys to discard the agent audio it has buffered."""
 
     def audio_sink_open(self) -> bool:
         """Returns whether audio can still be sent to Genesys."""
@@ -130,6 +141,7 @@ class CallSession:
         self._inbound: asyncio.Queue[bytes] = asyncio.Queue()
         self._listen_task: asyncio.Task[None] | None = None
         self._rollover_task: asyncio.Task[None] | None = None
+        self._silence_task: asyncio.Task[None] | None = None
         self._reconnecting = False
         self._generation = 0
         self._closed = False
@@ -304,17 +316,72 @@ class CallSession:
     async def _open_backend(
         self, rehydration_payload: str | None = None
     ) -> bool:
-        try:
-            await self._backend.open(
-                self._start, rehydration_payload=rehydration_payload
-            )
-        except base.BackendOpenError as err:
-            if not self._genesys.disconnect_initiated:
-                await self._genesys.send_disconnect(
-                    "error", info=f"CES Connection/Config Error: {err}"
+        """Opens the backend, retrying transient failures within a budget.
+
+        Records every attempt in the health metrics. On final failure a
+        disconnect is sent.
+
+        Args:
+          rehydration_payload: Passed through to the backend.
+
+        Returns:
+          Whether the backend is open.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        for attempt in range(len(OPEN_RETRY_BACKOFFS_S) + 1):
+            attempt_started = loop.time()
+            try:
+                await self._backend.open(
+                    self._start, rehydration_payload=rehydration_payload
                 )
-            return False
-        return True
+            except base.BackendOpenError as err:
+                health.health_checker.record_ces_event(
+                    (loop.time() - attempt_started) * 1000, is_error=True
+                )
+                backoff_s = (
+                    OPEN_RETRY_BACKOFFS_S[attempt]
+                    if attempt < len(OPEN_RETRY_BACKOFFS_S)
+                    else None
+                )
+                elapsed_s = loop.time() - started
+                if (
+                    not err.retryable
+                    or backoff_s is None
+                    or elapsed_s + backoff_s > OPEN_RETRY_BUDGET_S
+                ):
+                    await self._fail_open(err)
+                    return False
+                logger.warning(
+                    "Transient error opening backend; retrying in %ss",
+                    backoff_s,
+                    extra=self.log_extra(
+                        "backend_open_retry",
+                        {"attempt": attempt + 1, "error": str(err)},
+                    ),
+                )
+                await asyncio.sleep(backoff_s)
+                continue
+            latency_ms = (loop.time() - attempt_started) * 1000
+            health.health_checker.record_ces_event(latency_ms)
+            logger.info(
+                "Backend opened",
+                extra=self.log_extra(
+                    "backend_open",
+                    {
+                        "latency_ms": round(latency_ms, 1),
+                        "attempts": attempt + 1,
+                    },
+                ),
+            )
+            return True
+        return False
+
+    async def _fail_open(self, err: base.BackendOpenError) -> None:
+        if not self._genesys.disconnect_initiated:
+            await self._genesys.send_disconnect(
+                "error", info=f"CES Connection/Config Error: {err}"
+            )
 
     async def send_audio(self, chunk: bytes) -> None:
         """Forwards caller audio, buffering it during a rollover.
@@ -359,37 +426,38 @@ class CallSession:
                     "CES WS: Waiting for message...",
                     extra=self.log_extra("ces_recv_wait"),
                 )
-            if self.endsession_received:
-                try:
-                    event = await asyncio.wait_for(
-                        self._backend.receive(),
-                        timeout=POST_END_SESSION_RECV_TIMEOUT_S,
-                    )
-                except asyncio.TimeoutError:
-                    logger.info(
-                        "Timeout waiting for audio after endSession. Exiting"
-                        " listen loop.",
-                        extra=self.log_extra("ces_listen_timeout"),
-                    )
-                    break
-            else:
-                event = await self._backend.receive()
+            event = await self._backend.receive()
+            if generation != self._generation:
+                return  # A rollover replaced this stream; nothing to do.
             if not await self._handle_event(event):
                 break
-        if generation != self._generation:
-            return  # A rollover replaced this stream; nothing to finalize.
+        if self.endsession_received and not self._genesys.disconnect_initiated:
+            await self._finish_agent_end()
+            return
         logger.info(
             "Exited listen loop, waiting for pacer to drain...",
             extra=self.log_extra("ces_listen_exit"),
         )
         await self._pacer.wait_drained()
         await self.close()
-        if self.endsession_received and not self._genesys.disconnect_initiated:
-            await self._genesys.send_disconnect(
-                "completed",
-                info="Session has ended successfully in CES",
-                output_variables=self._final_params,
-            )
+
+    async def _finish_agent_end(self) -> None:
+        """Agent-ends teardown: play out, disconnect, then close (TC-7.1).
+
+        The end of session applies only after the audio queued before it has
+        played, and nothing waits for further backend messages.
+        """
+        logger.info(
+            "CES endSession: draining final audio before disconnect",
+            extra=self.log_extra("ces_endsession_wait_audio"),
+        )
+        await self._pacer.drain_and_wait(PLAYBACK_DRAIN_CAP_S)
+        await self._genesys.send_disconnect(
+            "completed",
+            info="Session has ended successfully in CES",
+            output_variables=self._final_params,
+        )
+        await self.close()
 
     async def _handle_event(self, event: base.BackendEvent | None) -> bool:
         """Applies one backend event.
@@ -402,10 +470,16 @@ class CallSession:
         """
         if isinstance(event, base.BargeIn):
             self._pacer.clear_for_barge_in()
+            if not self._genesys.disconnect_initiated:
+                await self._genesys.send_barge_in()
         elif isinstance(event, base.AudioOut):
             self._pacer.enqueue(event.audio)
         elif isinstance(event, base.EndOfInteraction):
             self._on_end_of_interaction(event)
+            # Once the agent has ended the session nothing else is needed
+            # from the backend, unless a hang-up teardown is already waiting
+            # on it.
+            return self._genesys.disconnect_initiated
         elif isinstance(event, base.Rollover):
             self._rollover_task = asyncio.create_task(self._rollover())
         elif isinstance(event, base.StreamEnded):
@@ -413,6 +487,7 @@ class CallSession:
             self.backend_data_received.set()
             return False
         elif isinstance(event, base.BackendError):
+            health.health_checker.record_ces_event(0.0, is_error=True)
             if not self._genesys.disconnect_initiated:
                 await self._genesys.send_disconnect("error", info=event.message)
             self.backend_data_received.set()
@@ -421,30 +496,31 @@ class CallSession:
 
     def _on_end_of_interaction(self, event: base.EndOfInteraction) -> None:
         self.endsession_received = True
-        self._pacer.end_of_stream = True
         if not self._genesys.disconnect_initiated:
             self._final_params = dict(event.output_variables)
-            logger.info(
-                "CES endSession: Waiting for final audio...",
-                extra=self.log_extra("ces_endsession_wait_audio"),
-            )
         self.backend_data_received.set()
 
     async def _on_stream_ended(self, event: base.StreamEnded) -> None:
         data = {"code": event.code, "reason": event.reason, "exc": event.detail}
-        if self._genesys.disconnect_initiated or event.clean:
+        if self._genesys.disconnect_initiated or self.endsession_received:
             logger.info(
                 "CES WS connection closed cleanly",
                 extra=self.log_extra("ces_connection_closed", data),
             )
             return
+        # The stream ended while the call was still active, so Genesys must
+        # be told; otherwise the caller hears silence until they hang up.
         logger.warning(
             "CES WS connection closed unexpectedly",
-            extra=self.log_extra("ces_connection_closed", data),
+            extra=self.log_extra(
+                "ces_connection_closed", {**data, "clean_code": event.clean}
+            ),
         )
+        health.health_checker.record_ces_event(0.0, is_error=True)
         if event.sys_error:
+            # The graceful Architect error path: `completed` plus SYS_ERROR.
             await self._genesys.send_disconnect(
-                "normal", output_variables={"SYS_ERROR": event.sys_error}
+                "completed", output_variables={"SYS_ERROR": event.sys_error}
             )
         else:
             await self._genesys.send_disconnect(
@@ -471,7 +547,6 @@ class CallSession:
         await _cancel_and_wait(self._listen_task)
         await self._pacer.cancel_task()
         self.endsession_received = False
-        self._pacer.end_of_stream = False
         if not await self._open_backend(_REHYDRATION_PAYLOAD):
             logger.error(
                 "Failed to re-establish CES connection during rehydration",
@@ -501,6 +576,39 @@ class CallSession:
                 break  # Already logged by the backend.
             flushed += 1
         return flushed
+
+    def on_playback_completed(self) -> None:
+        """Records that Genesys finished playing the agent audio sent."""
+        self._pacer.on_playback_completed()
+
+    async def stop_audio(self) -> None:
+        """Stops sending agent audio to Genesys (before `closed`, TC-7.2)."""
+        await self._pacer.stop()
+
+    def pause(self) -> None:
+        """Starts the silence keepalive while Genesys is paused (TC-3.2).
+
+        The backend needs continuous audio: CES ends an idle session after
+        30 s, and Dialogflow expects continuous input.
+        """
+        if self._silence_task is None or self._silence_task.done():
+            self._silence_task = asyncio.create_task(self._send_silence())
+
+    async def resume(self) -> None:
+        """Stops the silence keepalive."""
+        await _cancel_and_wait(self._silence_task)
+        self._silence_task = None
+
+    async def _send_silence(self) -> None:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        frames = 0
+        while True:
+            await self.send_audio(SILENCE_FRAME)
+            frames += 1
+            # Anchor to the start time so the pace doesn't drift.
+            delay_s = started + frames * SILENCE_FRAME_S - loop.time()
+            await asyncio.sleep(max(0.0, delay_s))
 
     async def hangup(self) -> None:
         """Ends the call after the caller hung up or the socket dropped.
@@ -572,7 +680,11 @@ class CallSession:
         await self._pacer.stop()
         self._clear_inbound()
         current_task = asyncio.current_task()
-        for task in (self._listen_task, self._rollover_task):
+        for task in (
+            self._listen_task,
+            self._rollover_task,
+            self._silence_task,
+        ):
             if task is not current_task:
                 await _cancel_and_wait(task)
         await self._backend.close()

@@ -125,7 +125,22 @@ BackendEvent = (
 
 
 class BackendOpenError(Exception):
-    """The backend could not open or configure a session."""
+    """The backend could not open or configure a session.
+
+    Attributes:
+      retryable: Whether the failure is transient (timeout, 5xx,
+        UNAVAILABLE, DEADLINE_EXCEEDED) and worth retrying.
+    """
+
+    def __init__(self, message: str, retryable: bool = False):
+        """Initializes the error.
+
+        Args:
+          message: Description of the failure.
+          retryable: Whether the failure is transient.
+        """
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class BackendSendError(Exception):

@@ -79,6 +79,52 @@ class OutboundPacerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.sent)
         self.on_error.assert_not_awaited()
 
+    async def test_audio_dequeued_before_barge_in_is_dropped(self):
+        self.pacer.enqueue(b"\x7f" * 800)
+        self.pacer.clear_for_barge_in()
+        # Simulate a chunk that was taken off the queue before the barge-in
+        # and is only handled afterwards.
+        self.pacer._queue.put_nowait(  # pylint: disable=protected-access
+            (self.pacer.epoch - 1, b"\x7f" * 800)
+        )
+        self.pacer.enqueue(b"\x01" * 400)
+        self.pacer.end_of_stream = True
+        self.pacer.start()
+
+        await asyncio.wait_for(self.pacer.wait_drained(), 2.0)
+
+        self.assertEqual(b"".join(self.sent), b"\x01" * 400)
+
+    async def test_drain_and_wait_returns_on_playback_completed(self):
+        self.pacer.enqueue(b"\x7f" * 8000)  # 1 s of audio.
+        self.pacer.start()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        drain = asyncio.create_task(self.pacer.drain_and_wait(cap_s=5.0))
+        await asyncio.sleep(0.7)  # Prime plus one paced send.
+        self.pacer.on_playback_completed()
+
+        await asyncio.wait_for(drain, 3.0)
+
+        self.assertLess(loop.time() - started, 2.0)
+
+    async def test_drain_and_wait_is_capped(self):
+        self.pacer.enqueue(b"\x7f" * 4000)  # Sent at once as the prime.
+        self.pacer.start()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        await asyncio.wait_for(self.pacer.drain_and_wait(cap_s=0.1), 2.0)
+
+        # Prime goes out after one interval; then at most the 0.1 s cap.
+        self.assertLess(loop.time() - started, pacer.SEND_INTERVAL_S + 0.4)
+
+    async def test_stop_is_idempotent(self):
+        self.pacer.start()
+
+        await self.pacer.stop()
+        await self.pacer.stop()
+
     async def test_stop_discards_queued_audio(self):
         self.pacer.enqueue(b"\x7f" * 800)
         self.pacer.start()

@@ -134,8 +134,10 @@ class FakeCesConnection:
 class FakeCesServer:
     """A localhost WebSocket server that plays a CES script."""
 
-    def __init__(self, script: CesScript):
+    def __init__(self, script: CesScript, reject_first: int = 0):
         self._script = script
+        self._reject_remaining = reject_first
+        self.rejected = 0
         self.connections: list[FakeCesConnection] = []
         self._server = None
 
@@ -145,12 +147,22 @@ class FakeCesServer:
         return f"ws://127.0.0.1:{port}/ws/BidiRunSession/locations/"
 
     async def __aenter__(self) -> "FakeCesServer":
-        self._server = await ws_server.serve(self._handle, "127.0.0.1", 0)
+        self._server = await ws_server.serve(
+            self._handle, "127.0.0.1", 0, process_request=self._process_request
+        )
         return self
 
     async def __aexit__(self, *exc_info) -> None:
         self._server.close()
         await self._server.wait_closed()
+
+    def _process_request(self, connection, request):
+        del request  # Unused.
+        if self._reject_remaining <= 0:
+            return None
+        self._reject_remaining -= 1
+        self.rejected += 1
+        return connection.respond(503, "Service Unavailable\n")
 
     async def _handle(self, connection: ws_server.ServerConnection) -> None:
         ces = FakeCesConnection(connection)
@@ -351,8 +363,14 @@ class CesContractTest(unittest.IsolatedAsyncioTestCase):
             await self._start_call(server)
             await self._wait_for_disconnect()
 
-        # Only the 500 ms prime (and at most one paced send) went out.
+        # Only the 500 ms prime (and at most one paced send) went out, and
+        # Genesys was told to discard what it had buffered (TC-5.1).
         self.assertLess(self.genesys.audio_bytes(), 12000)
+        events = self.genesys.messages("event")
+        self.assertEqual(
+            events[0]["parameters"],
+            {"entities": [{"type": "barge_in", "data": {}}]},
+        )
 
     async def test_dtmf_is_forwarded(self):
         async def script(_, ces: FakeCesConnection) -> None:
@@ -463,30 +481,151 @@ class CesContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             disconnect["parameters"],
             {
-                "reason": "normal",
+                "reason": "completed",
                 "outputVariables": {"SYS_ERROR": "CES_RESOURCE_EXHAUSTED"},
             },
         )
 
-    async def test_end_session_without_close_times_out_and_completes(self):
+    async def test_end_session_disconnects_without_waiting_for_ces(self):
         async def script(_, ces: FakeCesConnection) -> None:
             await ces.wait_for(_is_event("session_start"))
             await ces.send({"endSession": {"metadata": {}}})
             await ces.closed.wait()
 
-        self._stack.enter_context(
-            mock.patch.object(
-                call_session, "POST_END_SESSION_RECV_TIMEOUT_S", 0.2
-            )
-        )
         async with FakeCesServer(script) as server:
             await self._start_call(server)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
             disconnect = await self._wait_for_disconnect()
+            elapsed_s = loop.time() - started
+            # The adapter closes the CES socket itself (TC-7.1).
             await asyncio.wait_for(
                 server.connections[0].closed.wait(), _TIMEOUT_S
             )
 
         self.assertEqual(disconnect["parameters"]["reason"], "completed")
+        self.assertLess(elapsed_s, 2.0)
+
+    async def test_close_without_end_session_disconnects(self):
+        async def script(_, ces: FakeCesConnection) -> None:
+            await ces.wait_for(_is_event("session_start"))
+            await ces.connection.close()
+
+        async with FakeCesServer(script) as server:
+            await self._start_call(server)
+            disconnect = await self._wait_for_disconnect()
+
+        self.assertEqual(
+            disconnect["parameters"],
+            {"reason": "error", "info": "CES WS Closed: 1000"},
+        )
+
+    async def test_transient_open_failure_is_retried(self):
+        async def script(_, ces: FakeCesConnection) -> None:
+            await ces.wait_for(_is_event("session_start"))
+            await ces.closed.wait()
+
+        async with FakeCesServer(script, reject_first=1) as server:
+            await self._start_call(server)
+            await _wait_until(lambda: self.genesys.messages("opened"))
+
+        self.assertEqual(server.rejected, 1)
+        self.assertEqual(len(server.connections), 1)
+
+    async def test_pause_sends_silence_until_resumed(self):
+        silence = base64.b64encode(b"\xff" * 160).decode()
+
+        def is_silence(message: dict) -> bool:
+            return message.get("realtimeInput", {}).get("audio") == silence
+
+        async def script(_, ces: FakeCesConnection) -> None:
+            await ces.closed.wait()
+
+        async with FakeCesServer(script) as server:
+            await self._start_call(server)
+            await _wait_until(lambda: self.genesys.messages("opened"))
+            self.genesys.push(
+                {"type": "paused", "seq": 2, "id": "genesys-session-1"}
+            )
+            await asyncio.sleep(0.3)
+            self.genesys.push(
+                {"type": "resumed", "seq": 3, "id": "genesys-session-1"}
+            )
+            await asyncio.sleep(0.1)
+            frames_at_resume = sum(
+                map(is_silence, server.connections[0].received)
+            )
+            await asyncio.sleep(0.2)
+            frames_later = sum(map(is_silence, server.connections[0].received))
+
+        # About 15 frames in 300 ms; none after `resumed`.
+        self.assertGreaterEqual(frames_at_resume, 10)
+        self.assertEqual(frames_later, frames_at_resume)
+
+    async def test_no_audio_after_closed(self):
+        async def script(_, ces: FakeCesConnection) -> None:
+            await ces.wait_for(_is_event("session_start"))
+            for _ in range(10):
+                await ces.send_audio(8000)
+            await ces.closed.wait()
+
+        async with FakeCesServer(script) as server:
+            await self._start_call(server)
+            await _wait_until(lambda: self.genesys.audio_bytes() > 0)
+            self.genesys.push(
+                {"type": "close", "seq": 2, "id": "genesys-session-1"}
+            )
+            await _wait_until(lambda: self.genesys.messages("closed"))
+            await asyncio.sleep(0.6)  # Two pacer intervals.
+            await asyncio.wait_for(
+                server.connections[0].closed.wait(), _TIMEOUT_S
+            )
+
+        sent = self.genesys.sent
+        closed_index = next(
+            i
+            for i, m in enumerate(sent)
+            if isinstance(m, str) and json.loads(m)["type"] == "closed"
+        )
+        self.assertFalse(
+            [m for m in sent[closed_index:] if isinstance(m, bytes)]
+        )
+
+    async def test_stereo_offer_accepts_external_channel_only(self):
+        async def script(_, ces: FakeCesConnection) -> None:
+            await ces.closed.wait()
+
+        async with FakeCesServer(script) as server:
+            self._use_backend_url(server.base_url)
+            self._handler_task = asyncio.create_task(
+                self.handler.handle_connection()
+            )
+            message = _open_message(
+                {"_deployment_id": _DEPLOYMENT_ID}, _CONVERSATION_ID
+            )
+            message["parameters"]["media"] = [
+                {
+                    "type": "audio",
+                    "format": "PCMU",
+                    "channels": ["external", "internal"],
+                    "rate": 8000,
+                },
+            ]
+            self.genesys.push(message)
+            await _wait_until(lambda: self.genesys.messages("opened"))
+
+        opened = self.genesys.messages("opened")[0]
+        self.assertEqual(
+            opened["parameters"]["media"],
+            [
+                {
+                    "type": "audio",
+                    "format": "PCMU",
+                    "channels": ["external"],
+                    "rate": 8000,
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":
