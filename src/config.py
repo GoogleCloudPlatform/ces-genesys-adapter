@@ -43,3 +43,4 @@ LOG_UNREDACTED_DATA = os.getenv("LOG_UNREDACTED_DATA")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEBUG_WEBSOCKETS = os.getenv("DEBUG_WEBSOCKETS", "false") == 'true'
 DISCONNECT_EVENT_NAME = os.getenv("DISCONNECT_EVENT_NAME", "sys.remote-call-disconnected")
+FORCE_ADAPTER_SESSION_ID = os.getenv("FORCE_ADAPTER_SESSION_ID", "false").lower() == "true"

@@ -24,7 +24,7 @@ from websockets.connection import State
 
 from .auth import auth_provider
 from .redaction import redact, redact_value
-from .config import DISCONNECT_EVENT_NAME
+from .config import DISCONNECT_EVENT_NAME, FORCE_ADAPTER_SESSION_ID
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,11 @@ class CESWS:
         return self.websocket and self.websocket.state == State.OPEN
 
     async def connect(self, agent_id, deployment_id=None, initial_message=None, session_id=None, rehydration_payload=None):
-        session_id_part = session_id if session_id else self.adapter_session_id
+        session_id_part = (
+            self.adapter_session_id
+            if (FORCE_ADAPTER_SESSION_ID or not session_id)
+            else session_id
+        )
         self.session_id = f"{agent_id}/sessions/{session_id_part}"
         self.deployment_id = deployment_id
         self.initial_message = initial_message
