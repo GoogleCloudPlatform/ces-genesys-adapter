@@ -44,16 +44,27 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
+This installs the runtime dependencies plus `isort`, `pytest` and
+`pytest-asyncio`.
+
 **3. Format, sort imports and lint**
+
+`pyink` and `pylint` aren't project dependencies: `pyink` pins an exact `black`
+release, which would otherwise end up in `uv.lock`. Run them with `uvx` at the
+same versions CI uses (`PYINK_VERSION` and `PYLINT_VERSION` in
+`.github/workflows/tests.yml`).
 
 Run these from the repository root. Pass specific files to limit the changes to
 the code you're working on:
 ```bash
-uv run pyink path/to/file.py           # format
+uvx pyink@26.5.1 path/to/file.py       # format
 uv run isort path/to/file.py           # sort imports
-PYTHONPATH=. uv run pylint --rcfile=.pylintrc path/to/file.py
+PYTHONPATH=. uvx --with-requirements requirements.txt pylint@4.1.3 \
+    --rcfile=.pylintrc path/to/file.py # lint
 uv run pytest                          # tests
 ```
+
+When you update a tool version, change it in both this file and the workflow.
 
 Avoid reformatting files you aren't otherwise changing, so pull request diffs
 stay reviewable.

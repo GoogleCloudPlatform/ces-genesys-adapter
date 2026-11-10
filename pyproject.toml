@@ -18,17 +18,19 @@ dependencies = [
 [dependency-groups]
 dev = [
     "isort>=7.0.0",
-    "pyink>=26.5.1",
-    "pylint>=4.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
 
-# Google Python Style Guide formatting (https://google.github.io/styleguide/pyguide.html):
-# 80 columns, 4-space indentation. Lint rules live in .pylintrc.
+# Google Python Style Guide formatting
+# (https://google.github.io/styleguide/pyguide.html): 80 columns, 4-space
+# indentation. Lint rules live in .pylintrc. pyink and pylint are deliberately
+# not dev dependencies: pyink pins an exact black release, which would put
+# black in uv.lock. CI and LINTING.md pin their versions instead.
 [tool.pyink]
 line-length = 80
 pyink-indentation = 4
