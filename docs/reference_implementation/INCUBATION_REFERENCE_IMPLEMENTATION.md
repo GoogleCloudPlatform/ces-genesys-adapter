@@ -311,12 +311,6 @@ export GENESYS_CLIENT_SECRET_PATH="your-genesys-client-secret-name"
 
 # AUTH_TOKEN_SECRET_PATH="projects/123456789012/secrets/my-secret-token-path"
 
-# PHONE NUMBER MAPPING CONFIGURATION (see "Phone Number to Agent Mapping" section in README.md)
-# Choose ONE of the following methods.
-# 1. Firestore (recommended for production)
-# NUMBERS_COLLECTION_ID="ces-twilio-adapter-mappings"
-# 2. Local JSON file (for development/testing)
-NUMBERS_CONFIG_FILE="number_mappings.json"
 LOG_UNREDACTED_DATA="false" # Defaults to "false"; setting to "true" is only recommended for non-production environments for testing and debugging.
 DEBUG_WEBSOCKETS="false" # Defaults to "false"; setting to "true" is only recommended for non-production environments for testing and debugging.
 ```

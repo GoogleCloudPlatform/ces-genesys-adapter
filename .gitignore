@@ -17,5 +17,4 @@ script/values-*.sh
 !script/values.sh.example
 script/deploy-*.sh
 tmp/
-tests
 

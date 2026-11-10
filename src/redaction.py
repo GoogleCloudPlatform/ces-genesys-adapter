@@ -17,14 +17,14 @@
 import copy
 import json
 
-from .config import LOG_UNREDACTED_DATA
+from .settings import settings
 
 REDACT_KEYS = ["inputVariables", "participant", "variables", "outputVariables", "output_variables", "diagnosticInfo", "params", "text"]
 
 
 def redact_value(value: any) -> any:
-    """Returns '<REDACTED>' if LOG_UNREDACTED_DATA is not 'true'."""
-    if LOG_UNREDACTED_DATA == 'true':
+    """Returns '<REDACTED>' unless LOG_UNREDACTED_DATA is 'true'."""
+    if settings.log_unredacted_data:
         return value
     return "<REDACTED>"
 
@@ -50,7 +50,7 @@ def dict_redact(data: dict) -> dict:
 
 
 def redact(data: str | dict) -> str | dict:
-    """Redacts the given data if LOG_UNREDACTED_DATA is not true.
+    """Redacts the given data unless LOG_UNREDACTED_DATA is 'true'.
 
     If the data is a dictionary, it is passed to dict_redact.
     If the data is a JSON string that deserializes to a dictionary, it
@@ -62,7 +62,7 @@ def redact(data: str | dict) -> str | dict:
     Returns:
         The redacted data (string or dictionary).
     """
-    if LOG_UNREDACTED_DATA == 'true':
+    if settings.log_unredacted_data:
         return data
 
     if isinstance(data, dict):

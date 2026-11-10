@@ -16,7 +16,7 @@ import logging
 import json
 from datetime import datetime
 import re
-from . import config
+from .settings import settings
 
 class JSONFormatter(logging.Formatter):
     """Custom JSON Formatter for Google Cloud Logging."""
@@ -113,7 +113,7 @@ def setup_logger():
     """Sets up the root logger to use JSONFormatter."""
     logger = logging.getLogger()
     
-    log_level_str = config.LOG_LEVEL.upper() if hasattr(config, "LOG_LEVEL") else "INFO"
+    log_level_str = (settings.log_level or "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
     logger.setLevel(log_level)
 
@@ -127,7 +127,7 @@ def setup_logger():
     logger.addHandler(handler)
 
     # Enable debug logging for websockets library if configured
-    if config.DEBUG_WEBSOCKETS:
+    if settings.debug_websockets:
         handler.setLevel(logging.DEBUG) # Ensure handler processes DEBUG messages
         ws_logger = logging.getLogger("websockets")
         ws_logger.setLevel(logging.DEBUG)

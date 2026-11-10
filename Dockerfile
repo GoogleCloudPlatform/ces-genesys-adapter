@@ -28,8 +28,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
+# Make the code readable by the runtime user regardless of the build host's
+# umask; files stay owned by root so the app cannot modify them.
+RUN chmod -R a+rX /app
+
 # Set the port the container will listen on
-ENV PORT 8080
+ENV PORT=8080
+
+# Run as the unprivileged user created above (not root)
+USER appuser
 
 # Command to run the application
 CMD ["python", "-m", "src.main"]

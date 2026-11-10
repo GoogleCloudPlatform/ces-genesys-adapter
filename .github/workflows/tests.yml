@@ -1,0 +1,96 @@
+# Unit tests plus Google Python style checks. Uses fakes and mocks only: no
+# Google Cloud or Genesys credentials are needed, and no secrets are available
+# to this workflow.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pytest>=8.0" "pytest-asyncio>=0.23"
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  style:
+    # Google Python Style Guide: pyink (formatting) and pylint (.pylintrc).
+    # New Python files must pass (blocking). Modified pre-existing files are
+    # reported but don't fail the build; they're brought into compliance as
+    # they're rewritten.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyink>=26.5.1" "pylint>=4.1" "pytest>=8.0" "pytest-asyncio>=0.23"
+
+      - name: Find changed Python files
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "${BASE_SHA}" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
+          fi
+          git diff --name-only --no-renames --diff-filter=A "${BASE_SHA}" HEAD -- '*.py' > added.txt
+          git diff --name-only --no-renames --diff-filter=M "${BASE_SHA}" HEAD -- '*.py' > modified.txt
+          echo "Added:"; cat added.txt; echo "Modified:"; cat modified.txt
+
+      - name: pyink and pylint on added files (blocking)
+        run: |
+          if [ -s added.txt ]; then
+            xargs -a added.txt pyink --check --diff
+            xargs -a added.txt env PYTHONPATH=. pylint --rcfile=.pylintrc
+          else
+            echo "No added Python files."
+          fi
+
+      - name: pyink and pylint on modified files (advisory)
+        continue-on-error: true
+        run: |
+          if [ -s modified.txt ]; then
+            xargs -a modified.txt pyink --check --diff || true
+            xargs -a modified.txt env PYTHONPATH=. pylint --rcfile=.pylintrc --exit-zero
+          else
+            echo "No modified Python files."
+          fi

@@ -31,7 +31,7 @@ from starlette.websockets import WebSocketDisconnect
 from .ces_ws import CESWS
 from .redaction import redact, redact_value
 from websockets.protocol import State
-from .config import LOG_UNREDACTED_DATA, DISCONNECT_EVENT_NAME, FORCE_ADAPTER_SESSION_ID
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ class GenesysWS:
                             except json.JSONDecodeError:
                                 logger.warning(f"Failed to JSON decode _initial_message: {self.input_variables['_initial_message']}", exc_info=True, extra=self._get_log_extra(log_type="genesys_config_warning"))
                                 self.initial_message = self.input_variables["_initial_message"] # Fallback to using the raw string
-                        if "_session_id" in self.input_variables and not FORCE_ADAPTER_SESSION_ID:
+                        if "_session_id" in self.input_variables and not settings.force_adapter_session_id:
                             self.session_id = self.input_variables["_session_id"]
                             self.conversation_id = self.session_id # Override Genesys conversation ID for logging correlation
 
@@ -175,7 +175,7 @@ class GenesysWS:
                         }
                         self.ces_input_variables["adapterSessionId"] = self.adapter_session_id
                     
-                    if FORCE_ADAPTER_SESSION_ID:
+                    if settings.force_adapter_session_id:
                         self.session_id = self.adapter_session_id
                     elif not self.session_id:
                         if self.conversation_id:
@@ -304,7 +304,7 @@ class GenesysWS:
     async def _background_ces_teardown(self):
         logger.info("Signalling CES and waiting up to 5.0s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
         if self.ces_ws and getattr(self.ces_ws, "is_connected", lambda: False)() and not getattr(self.ces_ws, "endsession_received", False):
-            logger.info(f"Sending '{DISCONNECT_EVENT_NAME}' event and clientHalfClose to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
+            logger.info(f"Sending '{settings.disconnect_event_name}' event and clientHalfClose to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
             try:
                 await self.ces_ws.send_genesys_disconnect_event()
                 await self.ces_ws.send_client_half_close()

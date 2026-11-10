@@ -1,0 +1,16 @@
+# Keep the container image small and free of local or personal files.
+.git
+.github
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests/
+tmp/
+*.log
+.env*
+*.env
+script/values.sh
+script/values-*.sh
+script/deploy-*.sh
+docs/

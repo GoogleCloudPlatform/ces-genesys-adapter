@@ -26,11 +26,11 @@ import uvicorn
 import websockets
 from websockets.connection import State
 
-from . import config
 from .auth import auth_provider
 from .genesys_ws import GenesysWS
 from .health import health_checker
 from .logging_utils import setup_logger
+from .settings import settings
 
 # Setup JSON logging for the entire application
 setup_logger()
@@ -142,11 +142,31 @@ class FastApiWebSocketAdapter:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: register signal handlers for graceful shutdown and container draining
+    loop = asyncio.get_running_loop()
     try:
-        loop = asyncio.get_running_loop()
         health_checker.register_signal_handlers(loop)
     except Exception:
         pass
+
+    # Resolve Application Default Credentials and the project ID once, off the
+    # event loop. Failing here stops startup, so Cloud Run keeps serving the
+    # previous healthy revision instead of failing every call.
+    try:
+        project_id = await loop.run_in_executor(
+            None, auth_provider.initialize_adc
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to resolve Application Default Credentials at startup",
+            exc_info=True,
+            extra={"log_type": "config_error", "error_type": type(e).__name__},
+        )
+        raise
+    logger.info(
+        "Application Default Credentials resolved",
+        extra={"log_type": "init", "project_id": project_id},
+    )
+
     logger.info("FastAPI application started", extra={"log_type": "init"})
     yield
     logger.info("FastAPI application shutting down", extra={"log_type": "shutdown"})
@@ -224,21 +244,21 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 def main():
-    if not config.GENESYS_API_KEY:
+    if not settings.genesys_api_key:
         logger.error(
             "GENESYS_API_KEY environment variable not set.",
             extra={"log_type": "config_error"},
         )
         sys.exit(1)
 
-    if not config.GENESYS_CLIENT_SECRET:
+    if not settings.genesys_client_secret:
         logger.error(
             "GENESYS_CLIENT_SECRET environment variable not set. This is required for signature verification.",
             extra={"log_type": "config_error"},
         )
         sys.exit(1)
 
-    port = int(config.PORT)
+    port = settings.port
     logger.info(
         "Starting FastAPI server with Uvicorn",
         extra={"log_type": "init", "port": port},

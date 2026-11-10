@@ -15,21 +15,21 @@
 import asyncio
 from collections import deque
 import logging
-import os
 import signal
 import time
 from typing import Dict, Tuple
 
 from .auth import auth_provider
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Configurable environment variable thresholds
-HEALTH_WINDOW_SECONDS = int(os.getenv("HEALTH_WINDOW_SECONDS", 60))
-HEALTH_MIN_SAMPLES = int(os.getenv("HEALTH_MIN_SAMPLES", 15))
-MAX_CES_ERROR_RATE_PCT = float(os.getenv("MAX_CES_ERROR_RATE_PCT", 25.0))
-MAX_CES_AVG_LATENCY_MS = float(os.getenv("MAX_CES_AVG_LATENCY_MS", 1500.0))
-MAX_EVENT_LOOP_LAG_MS = float(os.getenv("MAX_EVENT_LOOP_LAG_MS", 500.0))
+# Configurable environment variable thresholds (see settings.py)
+HEALTH_WINDOW_SECONDS = settings.health_window_seconds
+HEALTH_MIN_SAMPLES = settings.health_min_samples
+MAX_CES_ERROR_RATE_PCT = settings.max_ces_error_rate_pct
+MAX_CES_AVG_LATENCY_MS = settings.max_ces_avg_latency_ms
+MAX_EVENT_LOOP_LAG_MS = settings.max_event_loop_lag_ms
 
 
 class RollingMetrics:

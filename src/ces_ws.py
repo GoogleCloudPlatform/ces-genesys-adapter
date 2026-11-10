@@ -18,13 +18,12 @@ import json
 import logging
 import uuid
 
-import google.auth
 import websockets
 from websockets.connection import State
 
 from .auth import auth_provider
 from .redaction import redact, redact_value
-from .config import DISCONNECT_EVENT_NAME, FORCE_ADAPTER_SESSION_ID
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +71,7 @@ class CESWS:
     async def connect(self, agent_id, deployment_id=None, initial_message=None, session_id=None, rehydration_payload=None):
         session_id_part = (
             self.adapter_session_id
-            if (FORCE_ADAPTER_SESSION_ID or not session_id)
+            if (settings.force_adapter_session_id or not session_id)
             else session_id
         )
         self.session_id = f"{agent_id}/sessions/{session_id_part}"
@@ -80,7 +79,8 @@ class CESWS:
         self.initial_message = initial_message
 
         try:
-            _, project_id = google.auth.default()
+            # Resolved once at startup and cached; never blocks the event loop here.
+            project_id = await auth_provider.get_project_id()
 
             try:
                 parts = agent_id.split("/")
@@ -231,20 +231,20 @@ class CESWS:
             logger.warning("Cannot send DTMF, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_dtmf_error", data={"digit": redact_value(digit)}))
 
     async def send_genesys_disconnect_event(self):
-        logger.info(f"Attempting to send '{DISCONNECT_EVENT_NAME}' event to CES", extra=self._get_log_extra(log_type="ces_send_event"))
+        logger.info(f"Attempting to send '{settings.disconnect_event_name}' event to CES", extra=self._get_log_extra(log_type="ces_send_event"))
         event_message = {
             "realtimeInput": {
                 "event": {
-                    "event": DISCONNECT_EVENT_NAME
+                    "event": settings.disconnect_event_name
                 }
             }
         }
         if self.is_connected():
             try:
                 await self.websocket.send(json.dumps(event_message))
-                logger.info(f"Sent '{DISCONNECT_EVENT_NAME}' event to CES", extra=self._get_log_extra(log_type="ces_send_event_success", data=event_message))
+                logger.info(f"Sent '{settings.disconnect_event_name}' event to CES", extra=self._get_log_extra(log_type="ces_send_event_success", data=event_message))
             except Exception as e:
-                logger.error(f"Error sending '{DISCONNECT_EVENT_NAME}' event to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_event_error"))
+                logger.error(f"Error sending '{settings.disconnect_event_name}' event to CES", exc_info=True, extra=self._get_log_extra(log_type="ces_send_event_error"))
         else:
             logger.warning("Cannot send event, CES WS not connected", extra=self._get_log_extra(log_type="ces_send_event_skip"))
 

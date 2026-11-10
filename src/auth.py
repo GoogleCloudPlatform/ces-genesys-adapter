@@ -25,9 +25,11 @@ import google.auth
 from google.auth.transport import requests as google_auth_requests
 from google.cloud import secretmanager
 
-from . import config
+from .settings import settings
 
 logger = logging.getLogger(__name__)
+
+_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
 class Auth:
@@ -37,10 +39,32 @@ class Auth:
         self._sm_client = None
         self._adc_creds = None
         self._adc_req = None
+        self.project_id = None
+
+    def initialize_adc(self):
+        """Resolves Application Default Credentials and the project ID once.
+
+        Called at application startup (blocking; run it in an executor). Raises
+        google.auth.exceptions.DefaultCredentialsError if ADC is unavailable.
+        """
+        creds, project_id = google.auth.default(scopes=[_CLOUD_PLATFORM_SCOPE])
+        self._adc_creds = creds
+        self._adc_req = google_auth_requests.Request()
+        self.project_id = project_id
+        return project_id
+
+    async def get_project_id(self):
+        """Returns the cached ADC project ID, resolving it if needed."""
+        if self._adc_creds is None:
+            async with self._lock:
+                if self._adc_creds is None:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self.initialize_adc)
+        return self.project_id
 
     async def get_token(self):
         async with self._lock:
-            if config.AUTH_TOKEN_SECRET_PATH:
+            if settings.auth_token_secret_path:
                 # Token-based auth
                 now_ms = int(time.time() * 1000)
                 if not self._token_info or self._token_info.get("expiry", 0) <= now_ms:
@@ -49,12 +73,11 @@ class Auth:
                 return self._token_info["access_token"]
             else:
                 # ADC-based auth
+                loop = asyncio.get_running_loop()
                 if self._adc_creds is None:
-                    self._adc_creds, _ = google.auth.default()
-                    self._adc_req = google_auth_requests.Request()
-                    
+                    await loop.run_in_executor(None, self.initialize_adc)
+
                 if not self._adc_creds.valid:
-                    loop = asyncio.get_running_loop()
                     await loop.run_in_executor(None, lambda: self._adc_creds.refresh(self._adc_req))
                 return self._adc_creds.token
 
@@ -62,7 +85,7 @@ class Auth:
         if not self._sm_client:
             self._sm_client = secretmanager.SecretManagerServiceClient()
 
-        secret_path = config.AUTH_TOKEN_SECRET_PATH
+        secret_path = settings.auth_token_secret_path
         if "/versions/" not in secret_path:
             secret_path = f"{secret_path}/versions/latest"
 
@@ -103,8 +126,8 @@ class Auth:
         # API Key Verification
         received_api_key = headers.get("x-api-key", "")
         
-        # Guard against None in config.GENESYS_API_KEY for robust typing
-        expected_key = config.GENESYS_API_KEY or ""
+        # Guard against None in settings.genesys_api_key for robust typing
+        expected_key = settings.genesys_api_key or ""
         
         logger.info(f"API key verification: received_length={len(received_api_key)}, expected_length={len(expected_key)}")
         
@@ -113,9 +136,9 @@ class Auth:
             return False
 
         # Signature Verification (if client secret is configured)
-        if config.GENESYS_CLIENT_SECRET:
+        if settings.genesys_client_secret:
             try:
-                client_secret = config.GENESYS_CLIENT_SECRET.strip()
+                client_secret = settings.genesys_client_secret.strip()
                 logger.info(f"Verifying signature with GENESYS_CLIENT_SECRET (length={len(client_secret)})")
                 secret = base64.b64decode(client_secret)
 
