@@ -19,8 +19,9 @@ import unittest
 from unittest import mock
 
 from src import auth
-from src import ces_ws
 from src import settings as settings_lib
+from src.backends import base
+from src.backends import ces_websocket
 
 _AGENT_ID = "projects/test-proj/locations/us/apps/app-1"
 
@@ -163,8 +164,14 @@ class AuthProjectIdTest(unittest.IsolatedAsyncioTestCase):
         mock_default.assert_called_once()
 
     async def test_ces_connect_uses_cached_project_id(self):
-        ces_client = ces_ws.CESWS(mock.MagicMock(), adapter_session_id="uuid")
-        provider = ces_ws.auth_provider
+        backend = ces_websocket.CesWebSocketBackend(lambda *_: {})
+        start = base.SessionStart(
+            agent_id=_AGENT_ID,
+            deployment_id=None,
+            session_id="uuid",
+            variables={},
+        )
+        provider = auth.auth_provider
         with (
             mock.patch.object(
                 provider,
@@ -180,11 +187,13 @@ class AuthProjectIdTest(unittest.IsolatedAsyncioTestCase):
             ),
             mock.patch.object(auth.google.auth, "default") as mock_default,
             mock.patch.object(
-                ces_ws.websockets, "connect", new_callable=mock.AsyncMock
+                ces_websocket.websockets,
+                "connect",
+                new_callable=mock.AsyncMock,
             ) as mock_connect,
         ):
             mock_connect.return_value = mock.AsyncMock()
-            await ces_client.connect(agent_id=_AGENT_ID)
+            await backend.open(start)
 
         mock_default.assert_not_called()
         headers = mock_connect.call_args.kwargs["additional_headers"]

@@ -1,57 +1,108 @@
 # Copyright 2025 Google LLC
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Genesys AudioHook protocol handling for one WebSocket connection.
+
+`GenesysWS` speaks the AudioHook wire protocol (open/opened, ping/pong,
+dtmf, close/closed, disconnect, sequence numbers). Everything about the
+call itself is delegated to `call_session.CallSession`.
+"""
+
 import asyncio
+from collections.abc import Coroutine, Mapping
 import json
 import logging
-import asyncio
-import weakref
+from typing import Any
+
+from starlette import websockets as starlette_websockets
 import websockets
+from websockets import protocol
 
-_global_background_tasks = set()
-
-def _create_detached_task(coro):
-    task = asyncio.create_task(coro)
-    _global_background_tasks.add(task)
-    task.add_done_callback(_global_background_tasks.discard)
-    return task
-from starlette.websockets import WebSocketDisconnect
-
-from .ces_ws import CESWS
-from .redaction import redact, redact_value
-from websockets.protocol import State
-from .settings import settings
+from src import call_session
+from src import redaction
 
 logger = logging.getLogger(__name__)
 
+PROBE_CONVERSATION_ID = "00000000-0000-0000-0000-000000000000"
+_EXPECTED_CLOSE_CODES = (1000, 1001, 1005)
+_ABNORMAL_CLOSE_CODE = 1006
+
+# Keeps detached tasks referenced until they finish.
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def _create_detached_task(
+    coro: Coroutine[Any, Any, None],
+) -> asyncio.Task[None]:
+    """Runs a coroutine as a task that outlives the connection handler."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+def _close_code_and_reason(
+    err: websockets.exceptions.ConnectionClosed,
+) -> tuple[int, str]:
+    close_frame = err.rcvd
+    if close_frame is None:
+        return _ABNORMAL_CLOSE_CODE, ""
+    return close_frame.code, close_frame.reason
+
+
+def select_media(
+    offered_media: list[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Returns the first offered PCMU 8 kHz audio media, if any.
+
+    Args:
+      offered_media: `parameters.media` from the Genesys `open` message.
+    """
+    for media in offered_media:
+        if (
+            media.get("type") == "audio"
+            and media.get("format") == "PCMU"
+            and media.get("rate") == 8000
+        ):
+            return media
+    return None
+
 
 class GenesysWS:
-    def __init__(self, websocket, adapter_session_id):
+    """AudioHook server side of one Genesys connection."""
+
+    def __init__(self, websocket: Any, adapter_session_id: str):
+        """Initializes the handler.
+
+        Args:
+          websocket: The Genesys socket (websockets `Protocol` interface).
+          adapter_session_id: UUID the adapter assigned to this connection.
+        """
         self.websocket = websocket
         self.adapter_session_id = adapter_session_id
-        self.ces_ws = None
+        self.call: call_session.CallSession | None = None
         self.last_server_sequence_number = 0
         self.last_client_sequence_number = 0
-        self.client_session_id = None
-        self.conversation_id = None
-        self.input_variables = None
+        self.client_session_id: str | None = None
+        self.conversation_id: str | None = None
         self.disconnect_initiated = False
         self.is_probe = False
-        self.ces_data_received = asyncio.Event()
-        self.close_wait_timeout = 2  # Seconds to wait for CES data
+        self._teardown_task: asyncio.Task[None] | None = None
 
-    def _get_log_extra(self, log_type: str, data: dict = None):
+    def _log_extra(
+        self, log_type: str, data: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         extra = {
             "log_type": log_type,
             "adapter_session_id": self.adapter_session_id,
@@ -59,359 +110,502 @@ class GenesysWS:
             "genesys_conv_id": self.conversation_id,
             "server_seq": self.last_server_sequence_number,
             "client_seq": self.last_client_sequence_number,
-            "ces_session_id": self.ces_ws.session_id if self.ces_ws and self.ces_ws.session_id else None
+            "ces_session_id": self.call.ces_session_id if self.call else None,
+            "agent_session_id": (
+                self.call.agent_session_id if self.call else None
+            ),
+            "connectivity_mode": (
+                self.call.connectivity_mode if self.call else None
+            ),
         }
         if data:
-            extra.update(redact(data))
+            extra.update(redaction.redact(dict(data)))
         return extra
 
-    async def handle_connection(self):
-        self.ces_ws = CESWS(self, self.adapter_session_id)
-
+    async def handle_connection(self) -> None:
+        """Reads Genesys messages until the connection ends."""
+        self.call = call_session.CallSession(self, self.adapter_session_id)
         try:
-            logger.debug("Genesys WS: Waiting for message...", extra=self._get_log_extra(log_type="genesys_recv_wait"))
+            logger.debug(
+                "Genesys WS: Waiting for message...",
+                extra=self._log_extra("genesys_recv_wait"),
+            )
             async for message in self.websocket:
                 if isinstance(message, str):
                     await self.handle_text_message(message)
                 elif isinstance(message, bytes):
                     await self.handle_binary_message(message)
-        except (websockets.exceptions.ConnectionClosedOK, websockets.exceptions.ConnectionClosedError) as e:
-            if self.disconnect_initiated or getattr(e, "code", 1000) in (1000, 1001, 1005):
-                logger.info(
-                    "Genesys WebSocket closed as expected.",
-                    extra=self._get_log_extra(
-                        log_type="genesys_connection_closed",
-                        data={"code": getattr(e, "code", 1000), "reason": getattr(e, "reason", "")}
-                    )
-                )
-            else:
-                logger.warning(
-                    "Genesys WebSocket closed unexpectedly mid-session.",
-                    extra=self._get_log_extra(
-                        log_type="genesys_connection_closed",
-                        data={"code": getattr(e, "code", None), "reason": getattr(e, "reason", None), "exc": str(e)}
-                    )
-                )
-                if self.ces_ws and self.ces_ws.is_connected():
-                    await self.send_disconnect("error", info=f"Genesys WS ConnectionClosedError: {e}")
-        except Exception as e:
-            logger.error("Error in Genesys WebSocket handler", exc_info=True, extra=self._get_log_extra(log_type="genesys_error"))
+        except websockets.exceptions.ConnectionClosed as err:
+            await self._on_connection_closed(err)
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "Error in Genesys WebSocket handler",
+                exc_info=True,
+                extra=self._log_extra("genesys_error"),
+            )
             if not self.disconnect_initiated:
-                 await self.send_disconnect("error", info=f"WebSocket Error: {e}")
+                await self.send_disconnect(
+                    "error", info=f"WebSocket Error: {err}"
+                )
         finally:
-            logger.info("Genesys connection loop finished. Cleaning up CES connection.", extra=self._get_log_extra(log_type="genesys_connection_cleanup"))
-            
-            # Wait for active teardown task (if Genesys sent 'close' cleanly)
-            if getattr(self, "_teardown_task", None) and not self._teardown_task.done():
-                logger.info("Background teardown task running asynchronously. Exiting connection loop.", extra=self._get_log_extra(log_type="genesys_teardown_running"))
+            self._on_connection_finished()
 
-            # If client disconnected abruptly without sending 'close' or 'session_disconnect'
-            if not getattr(self, "disconnect_initiated", False):
-                logger.info("Abrupt client disconnect detected. Triggering graceful teardown in background.", extra=self._get_log_extra(log_type="genesys_abrupt_teardown"))
-                self.disconnect_initiated = True
-                self._teardown_task = _create_detached_task(self._background_ces_teardown())
+    async def _on_connection_closed(
+        self, err: websockets.exceptions.ConnectionClosed
+    ) -> None:
+        code, reason = _close_code_and_reason(err)
+        if self.disconnect_initiated or code in _EXPECTED_CLOSE_CODES:
+            logger.info(
+                "Genesys WebSocket closed as expected.",
+                extra=self._log_extra(
+                    "genesys_connection_closed",
+                    {"code": code, "reason": reason},
+                ),
+            )
+            return
+        logger.warning(
+            "Genesys WebSocket closed unexpectedly mid-session.",
+            extra=self._log_extra(
+                "genesys_connection_closed",
+                {"code": code, "reason": reason, "exc": str(err)},
+            ),
+        )
+        if self.call and self.call.is_connected():
+            await self.send_disconnect(
+                "error", info=f"Genesys WS ConnectionClosedError: {err}"
+            )
 
-            # Let the disconnected background task clean up references internally if needed
+    def _on_connection_finished(self) -> None:
+        logger.info(
+            "Genesys connection loop finished. Cleaning up CES connection.",
+            extra=self._log_extra("genesys_connection_cleanup"),
+        )
+        if self._teardown_task and not self._teardown_task.done():
+            logger.info(
+                "Background teardown task running asynchronously. Exiting"
+                " connection loop.",
+                extra=self._log_extra("genesys_teardown_running"),
+            )
+        if not self.disconnect_initiated:
+            # The client went away without `close`: tear down in the
+            # background so the connection slot is released immediately.
+            logger.info(
+                "Abrupt client disconnect detected. Triggering graceful"
+                " teardown in background.",
+                extra=self._log_extra("genesys_abrupt_teardown"),
+            )
+            self.disconnect_initiated = True
+            self._teardown_task = _create_detached_task(self.call.hangup())
 
-    async def handle_text_message(self, message):
-        redacted_message = redact(message)
-        logger.info("Received text message from Genesys", extra=self._get_log_extra(log_type="genesys_recv", data={"data": redacted_message}))
+    async def handle_text_message(self, message: str) -> None:
+        """Handles one AudioHook text message.
+
+        Args:
+          message: The raw JSON message.
+        """
+        logger.info(
+            "Received text message from Genesys",
+            extra=self._log_extra(
+                "genesys_recv", {"data": redaction.redact(message)}
+            ),
+        )
         try:
             data = json.loads(message)
-            message_type = data.get('type')
-            logger.info("Received Genesys message", extra=self._get_log_extra(log_type="genesys_recv_parsed", data={"message_type": message_type}))
-            self.last_client_sequence_number = data.get("seq")
-            self.client_session_id = data.get("id")
-            message_type = data.get("type")
-            if message_type == "open":
-                parameters = data.get("parameters", {})
-                self.conversation_id = parameters.get("conversationId")
-
-                if self.conversation_id == "00000000-0000-0000-0000-000000000000":
-                    self.is_probe = True
-                    logger.info("Connection Probe detected (Null UUID). Skipping CES connection.", extra=self._get_log_extra(log_type="genesys_probe"))
-
-                self.input_variables = parameters.get("inputVariables")
-
-                self.deployment_id = None
-                self.agent_id = None
-
-                if not self.is_probe:
-                    self.initial_message = None
-                    self.session_id = None
-                    if self.input_variables:
-                        if "_deployment_id" in self.input_variables:
-                            self.deployment_id = self.input_variables["_deployment_id"]
-                            # Extract agent_id from deployment_id
-                            # deployment_id format:
-                            # projects/{project}/locations/{location}/apps/{app_id}/deployments/{deployment_id}
-                            # agent_id format:
-                            # projects/{project}/locations/{location}/apps/{app_id}
-                            parts = self.deployment_id.split("/")
-                            if len(parts) == 8 and parts[6] == "deployments":
-                                self.agent_id = "/".join(parts[:6])
-                            else:
-                                logger.error("Invalid _deployment_id format", extra=self._get_log_extra(log_type="genesys_config_error", data={"deployment_id": self.deployment_id}))
-                                await self.send_disconnect(
-                                    "error", "Invalid _deployment_id format"
-                                )
-                                return
-                        elif "_agent_id" in self.input_variables:
-                            self.agent_id = self.input_variables["_agent_id"]
-                        if "_initial_message" in self.input_variables:
-                            try:
-                              self.initial_message = json.loads(self.input_variables["_initial_message"])
-                            except json.JSONDecodeError:
-                                logger.warning(f"Failed to JSON decode _initial_message: {self.input_variables['_initial_message']}", exc_info=True, extra=self._get_log_extra(log_type="genesys_config_warning"))
-                                self.initial_message = self.input_variables["_initial_message"] # Fallback to using the raw string
-                        if "_session_id" in self.input_variables and not settings.force_adapter_session_id:
-                            self.session_id = self.input_variables["_session_id"]
-                            self.conversation_id = self.session_id # Override Genesys conversation ID for logging correlation
-
-                        self.ces_input_variables = {
-                            k: v
-                            for k, v in self.input_variables.items()
-                            if not k.startswith("_")
-                        }
-                        self.ces_input_variables["adapterSessionId"] = self.adapter_session_id
-                    
-                    if settings.force_adapter_session_id:
-                        self.session_id = self.adapter_session_id
-                    elif not self.session_id:
-                        if self.conversation_id:
-                            self.session_id = self.conversation_id
-                        else:
-                            self.session_id = self.adapter_session_id
-
-                    if not self.agent_id:
-                        logger.error("Missing _deployment_id or _agent_id", extra=self._get_log_extra(log_type="genesys_config_error", data={"input_variables": self.input_variables}))
-                        await self.send_disconnect(
-                            "error",
-                            "Missing required parameter: _agent_id or _deployment_id",
-                        )
-                        return
-
-                    if not await self.ces_ws.connect(self.agent_id, self.deployment_id, self.initial_message, self.session_id):
-                        logger.error("CES connection failed, stopping setup", extra=self._get_log_extra(log_type="genesys_config_error"))
-                        return # Disconnect is handled within ces_ws.connect
-
-                    try:
-                        self.ces_ws.listen_task = asyncio.create_task(self.ces_ws.listen())
-                        self.ces_ws.pacer_task = asyncio.create_task(self.ces_ws.pacer())
-                    except Exception as e:
-                        logger.error("Error creating CES listener or pacer tasks", exc_info=True, extra=self._get_log_extra(log_type="genesys_ces_task_error"))
-                        await self.send_disconnect("error", f"Task creation Error: {e}")
-                        return
-
-                    logger.info("Genesys session opened", extra=self._get_log_extra(log_type="genesys_open"))
-
-                custom_config_str = parameters.get("customConfig")
-                if custom_config_str:
-                    logger.info("Found customConfig from Genesys", extra=self._get_log_extra(log_type="genesys_custom_config", data={"custom_config_str": custom_config_str}))
-                    try:
-                        custom_config = json.loads(custom_config_str)
-                        if isinstance(custom_config, dict):
-                            for key, value in custom_config.items():
-                                logger.info("Custom config item", extra=self._get_log_extra(log_type="genesys_custom_config", data={"key": key, "value": value}))
-                        else:
-                            logger.warning("Custom config is not a dict", extra=self._get_log_extra(log_type="genesys_custom_config", data={"custom_config": custom_config}))
-                    except json.JSONDecodeError:
-                        logger.error("Error decoding customConfig JSON", extra=self._get_log_extra(log_type="genesys_custom_config_error", data={"custom_config": custom_config_str}))
-
-                offered_media = parameters.get("media", [])
-                selected_media = None
-                for media_option in offered_media:
-                    if (
-                        media_option.get("type") == "audio"
-                        and media_option.get("format") == "PCMU"
-                        and media_option.get("rate") == 8000
-                    ):
-                        selected_media = media_option
-                        break
-
-                if not selected_media:
-                    await self.send_disconnect(
-                        "error", "No compatible audio media offered."
-                    )
-                    return
-
-                opened_message = {
-                    "type": "opened",
-                    "version": "2",
-                    "id": self.client_session_id,
-                    "clientseq": self.last_client_sequence_number,
-                    "parameters": {"startPaused": False, "media": [selected_media]},
-                }
-                logger.info("Sending 'opened' message to Genesys", extra=self._get_log_extra(log_type="genesys_send_opened", data={"opened_msg": opened_message}))
-                await self.send_message(opened_message)
-
-            elif message_type == "ping":
-                logger.info("Received 'ping' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_ping"))
-                pong_message = {
-                    "type": "pong",
-                    "version": "2",
-                    "id": self.client_session_id,
-                    "clientseq": self.last_client_sequence_number,
-                }
-                await self.send_message(pong_message)
-
-            elif message_type == "playback_started":
-                logger.info("Received playback-started from Genesys", extra=self._get_log_extra(log_type="genesys_recv_playback_started", data={"data": data}))
-
-            elif message_type == "playback_completed":
-                logger.info("Received playback-completed from Genesys", extra=self._get_log_extra(log_type="genesys_recv_playback_completed", data={"data": data}))
-
-            elif message_type == "dtmf":
-                logger.info("Received 'dtmf' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_dtmf"))
-                digit = data.get("parameters", {}).get("digit")
-                if digit:
-                    logger.info("Received DTMF from Genesys", extra=self._get_log_extra(log_type="genesys_recv_dtmf", data={"digit": redact_value(digit)}))
-                    if self.ces_ws:
-                        await self.ces_ws.send_dtmf(digit)
-                else:
-                    logger.warning("Received DTMF message without digit", extra=self._get_log_extra(log_type="genesys_recv_dtmf_missing", data={"data": data}))
-            elif message_type == "close":
-                logger.info("Received 'close' message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_closed"))
-                
-                if self.disconnect_initiated:
-                    logger.info("Disconnect already initiated by adapter, sending 'closed' immediately.", extra=self._get_log_extra(log_type="genesys_close_ack"))
-                else:
-                    self.disconnect_initiated = True
-                    # Let the teardown execute in the background independently to free the Cloud Run connection slot.
-                    self._teardown_task = _create_detached_task(self._background_ces_teardown())
-
-                closed_message = {
-                    "type": "closed",
-                    "version": "2",
-                    "id": self.client_session_id,
-                    "clientseq": self.last_client_sequence_number,
-                    "parameters": {}
-                }
-                logger.info("Sending 'closed' message to Genesys", extra=self._get_log_extra(log_type="genesys_send_closed", data={"closed_message": redact(closed_message)}))
-                await self.send_message(closed_message)
-                # Genesys will close the connection after receiving 'closed'.
-
-            elif message_type == "update":
-                logger.info("Received update message from Genesys", extra=self._get_log_extra(log_type="genesys_recv_update", data={"data": data}))
-
-            else:
-                logger.info("Received unhandled message type from Genesys", extra=self._get_log_extra(log_type="genesys_recv_unhandled", data={"message_type": message_type, "data": data}))
-
         except json.JSONDecodeError:
-            logger.error("Error decoding JSON from Genesys", extra=self._get_log_extra(log_type="genesys_json_decode_error", data={"message": message}))
+            logger.error(
+                "Error decoding JSON from Genesys",
+                extra=self._log_extra(
+                    "genesys_json_decode_error", {"message": message}
+                ),
+            )
             await self.send_disconnect("error", "Invalid JSON received")
-
-    async def _background_ces_teardown(self):
-        logger.info("Signalling CES and waiting up to 5.0s for session to end...", extra=self._get_log_extra(log_type="genesys_recv_close_start"))
-        if self.ces_ws and getattr(self.ces_ws, "is_connected", lambda: False)() and not getattr(self.ces_ws, "endsession_received", False):
-            logger.info(f"Sending '{settings.disconnect_event_name}' event and clientHalfClose to CES", extra=self._get_log_extra(log_type="genesys_send_ces_event"))
-            try:
-                await self.ces_ws.send_genesys_disconnect_event()
-                await self.ces_ws.send_client_half_close()
-                logger.debug(f"Waiting up to 5.0 seconds for CES to process disconnect event...", extra=self._get_log_extra(log_type="genesys_close_wait"))
-                await asyncio.wait_for(self.ces_data_received.wait(), timeout=5.0)
-                await asyncio.sleep(0.5)
-                logger.info("CES finished processing disconnect event.", extra=self._get_log_extra(log_type="genesys_close_ces_complete"))
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout waiting for CES to process event after 5.0s. Proceeding with close.", extra=self._get_log_extra(log_type="genesys_close_timeout"))
-            except Exception as e:
-                logger.error(f"Error waiting for CES event: {e}", extra=self._get_log_extra(log_type="genesys_close_error"), exc_info=True)
-        else:
-            logger.warning("CES WS not connected, cannot send disconnect event", extra=self._get_log_extra(log_type="genesys_ces_event_skip"))
-
-        if self.ces_ws:
-            logger.info("Forcefully closing CES WS as per teardown protocol.", extra=self._get_log_extra(log_type="genesys_close_cesHandler_force"))
-            await self.ces_ws.close()
-
-    async def send_disconnect(self, reason="normal", info=None, output_variables=None):
-        if self.disconnect_initiated:
-            logger.info("Disconnect already in progress, skipping duplicate call", extra=self._get_log_extra(log_type="genesys_disconnect_duplicate"))
             return
-        self.disconnect_initiated = True
-        logger.info("Preparing to send disconnect", extra=self._get_log_extra(log_type="genesys_disconnect_start", data={"reason": reason, "info": info, "output_variables": output_variables}))
-        disconnect_message = {
-            "type": "disconnect",
+        message_type = data.get("type")
+        logger.info(
+            "Received Genesys message",
+            extra=self._log_extra(
+                "genesys_recv_parsed", {"message_type": message_type}
+            ),
+        )
+        self.last_client_sequence_number = data.get("seq")
+        self.client_session_id = data.get("id")
+        await self._dispatch(message_type, data)
+
+    async def _dispatch(self, message_type: str, data: dict[str, Any]) -> None:
+        if message_type == "open":
+            await self._on_open(data.get("parameters", {}))
+        elif message_type == "ping":
+            logger.info(
+                "Received 'ping' message from Genesys",
+                extra=self._log_extra("genesys_recv_ping"),
+            )
+            await self.send_message(self._reply("pong"))
+        elif message_type in ("playback_started", "playback_completed"):
+            logger.info(
+                "Received %s from Genesys",
+                message_type.replace("_", "-"),
+                extra=self._log_extra(
+                    f"genesys_recv_{message_type}", {"data": data}
+                ),
+            )
+        elif message_type == "dtmf":
+            await self._on_dtmf(data)
+        elif message_type == "close":
+            await self._on_close()
+        elif message_type == "update":
+            logger.info(
+                "Received update message from Genesys",
+                extra=self._log_extra("genesys_recv_update", {"data": data}),
+            )
+        else:
+            logger.info(
+                "Received unhandled message type from Genesys",
+                extra=self._log_extra(
+                    "genesys_recv_unhandled",
+                    {"message_type": message_type, "data": data},
+                ),
+            )
+
+    def _reply(
+        self, message_type: str, parameters: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        reply = {
+            "type": message_type,
             "version": "2",
             "id": self.client_session_id,
             "clientseq": self.last_client_sequence_number,
-            "parameters": {"reason": reason},
         }
+        if parameters is not None:
+            reply["parameters"] = dict(parameters)
+        return reply
 
+    async def _on_open(self, parameters: Mapping[str, Any]) -> None:
+        self.conversation_id = parameters.get("conversationId")
+        if self.conversation_id == PROBE_CONVERSATION_ID:
+            self.is_probe = True
+            logger.info(
+                "Connection Probe detected (Null UUID). Skipping CES"
+                " connection.",
+                extra=self._log_extra("genesys_probe"),
+            )
+        else:
+            started = await self.call.start(
+                parameters.get("inputVariables"), self.conversation_id
+            )
+            self.conversation_id = self.call.genesys_conv_id
+            if not started:
+                return
+            logger.info(
+                "Genesys session opened", extra=self._log_extra("genesys_open")
+            )
+        self._log_custom_config(parameters.get("customConfig"))
+        selected_media = select_media(parameters.get("media", []))
+        if not selected_media:
+            await self.send_disconnect(
+                "error", "No compatible audio media offered."
+            )
+            return
+        opened_message = self._reply(
+            "opened", {"startPaused": False, "media": [selected_media]}
+        )
+        logger.info(
+            "Sending 'opened' message to Genesys",
+            extra=self._log_extra(
+                "genesys_send_opened", {"opened_msg": opened_message}
+            ),
+        )
+        await self.send_message(opened_message)
+
+    def _log_custom_config(self, custom_config_str: str | None) -> None:
+        if not custom_config_str:
+            return
+        logger.info(
+            "Found customConfig from Genesys",
+            extra=self._log_extra(
+                "genesys_custom_config",
+                {"custom_config_str": custom_config_str},
+            ),
+        )
+        try:
+            custom_config = json.loads(custom_config_str)
+        except json.JSONDecodeError:
+            logger.error(
+                "Error decoding customConfig JSON",
+                extra=self._log_extra(
+                    "genesys_custom_config_error",
+                    {"custom_config": custom_config_str},
+                ),
+            )
+            return
+        if not isinstance(custom_config, dict):
+            logger.warning(
+                "Custom config is not a dict",
+                extra=self._log_extra(
+                    "genesys_custom_config", {"custom_config": custom_config}
+                ),
+            )
+            return
+        for key, value in custom_config.items():
+            logger.info(
+                "Custom config item",
+                extra=self._log_extra(
+                    "genesys_custom_config", {"key": key, "value": value}
+                ),
+            )
+
+    async def _on_dtmf(self, data: Mapping[str, Any]) -> None:
+        logger.info(
+            "Received 'dtmf' message from Genesys",
+            extra=self._log_extra("genesys_recv_dtmf"),
+        )
+        digit = data.get("parameters", {}).get("digit")
+        if not digit:
+            logger.warning(
+                "Received DTMF message without digit",
+                extra=self._log_extra(
+                    "genesys_recv_dtmf_missing", {"data": data}
+                ),
+            )
+            return
+        logger.info(
+            "Received DTMF from Genesys",
+            extra=self._log_extra(
+                "genesys_recv_dtmf", {"digit": redaction.redact_value(digit)}
+            ),
+        )
+        await self.call.send_dtmf(digit)
+
+    async def _on_close(self) -> None:
+        logger.info(
+            "Received 'close' message from Genesys",
+            extra=self._log_extra("genesys_recv_closed"),
+        )
+        if self.disconnect_initiated:
+            logger.info(
+                "Disconnect already initiated by adapter, sending 'closed'"
+                " immediately.",
+                extra=self._log_extra("genesys_close_ack"),
+            )
+        else:
+            self.disconnect_initiated = True
+            # Tear down in the background to free the Cloud Run connection.
+            self._teardown_task = _create_detached_task(self.call.hangup())
+        closed_message = self._reply("closed", {})
+        logger.info(
+            "Sending 'closed' message to Genesys",
+            extra=self._log_extra(
+                "genesys_send_closed",
+                {"closed_message": redaction.redact(closed_message)},
+            ),
+        )
+        await self.send_message(closed_message)
+
+    async def send_disconnect(
+        self,
+        reason: str = "normal",
+        info: str | None = None,
+        output_variables: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Stops the call and sends an AudioHook `disconnect` message.
+
+        Args:
+          reason: Disconnect reason.
+          info: Optional detail for `error` disconnects.
+          output_variables: Variables returned to Genesys; non-string values
+            are JSON-encoded.
+        """
+        if self.disconnect_initiated:
+            logger.info(
+                "Disconnect already in progress, skipping duplicate call",
+                extra=self._log_extra("genesys_disconnect_duplicate"),
+            )
+            return
+        self.disconnect_initiated = True
+        logger.info(
+            "Preparing to send disconnect",
+            extra=self._log_extra(
+                "genesys_disconnect_start",
+                {
+                    "reason": reason,
+                    "info": info,
+                    "output_variables": output_variables,
+                },
+            ),
+        )
+        parameters: dict[str, Any] = {"reason": reason}
         if info:
-            disconnect_message["parameters"]["info"] = info
+            parameters["info"] = info
         if output_variables:
-            disconnect_message["parameters"]["outputVariables"] = {
-                k: v if isinstance(v, str) else json.dumps(v, default=str)
-                for k, v in output_variables.items()
+            parameters["outputVariables"] = {
+                key: (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value, default=str)
+                )
+                for key, value in output_variables.items()
             }
-
-        if self.ces_ws:
-            logger.info("Stopping audio and clearing queues...", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
-            await self.ces_ws.close() # Make sure we close and clean up tasks
-            logger.info("Audio queues cleared and tasks cleaned up.", extra=self._get_log_extra(log_type="genesys_disconnect_audio_drain"))
-
-        logger.info("Sending disconnect message to Genesys", extra=self._get_log_extra(log_type="genesys_send_disconnect", data={"disconnect_message": redact(disconnect_message)}))
+        disconnect_message = self._reply("disconnect", parameters)
+        if self.call:
+            logger.info(
+                "Stopping audio and clearing queues...",
+                extra=self._log_extra("genesys_disconnect_audio_drain"),
+            )
+            await self.call.close()
+            logger.info(
+                "Audio queues cleared and tasks cleaned up.",
+                extra=self._log_extra("genesys_disconnect_audio_drain"),
+            )
+        logger.info(
+            "Sending disconnect message to Genesys",
+            extra=self._log_extra(
+                "genesys_send_disconnect",
+                {"disconnect_message": redaction.redact(disconnect_message)},
+            ),
+        )
         await self.send_message(disconnect_message)
 
-
-    def get_next_server_sequence_number(self):
+    def get_next_server_sequence_number(self) -> int:
+        """Increments and returns the server sequence number."""
         self.last_server_sequence_number += 1
         return self.last_server_sequence_number
 
-    async def handle_binary_message(self, message):
+    async def handle_binary_message(self, message: bytes) -> None:
+        """Forwards caller audio to the call.
+
+        Args:
+          message: PCMU audio at 8 kHz.
+        """
         if self.disconnect_initiated:
-            logger.info("GenesysWS: Ignoring binary message during disconnect", extra=self._get_log_extra(log_type="genesys_ignore_binary"))
+            logger.info(
+                "GenesysWS: Ignoring binary message during disconnect",
+                extra=self._log_extra("genesys_ignore_binary"),
+            )
             return
-
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("GenesysWS: Received binary message", extra=self._get_log_extra(log_type="genesys_recv_binary", data={"audio_size": len(message)}))
-        if self.ces_ws:
-            await self.ces_ws.send_audio(message)
+            logger.debug(
+                "GenesysWS: Received binary message",
+                extra=self._log_extra(
+                    "genesys_recv_binary", {"audio_size": len(message)}
+                ),
+            )
+        if self.call:
+            await self.call.send_audio(message)
 
-    async def send_message(self, message):
-        if not self.websocket or self.websocket.state != State.OPEN:
-            logger.debug("Attempted to send message on non-open WebSocket", extra=self._get_log_extra(log_type="genesys_send_error", data={"payload": redact(message)}))
+    async def send_audio(self, chunk: bytes) -> None:
+        """Sends one binary audio frame to Genesys (used by the pacer).
+
+        Args:
+          chunk: PCMU audio at 8 kHz.
+        """
+        await self.websocket.send(chunk)
+
+    def audio_sink_open(self) -> bool:
+        """Returns whether audio can still be sent to Genesys."""
+        return (
+            self.websocket is not None
+            and self.websocket.state != protocol.State.CLOSED
+        )
+
+    async def send_message(self, message: dict[str, Any]) -> None:
+        """Sends a JSON message to Genesys with the next sequence number.
+
+        Args:
+          message: The message; `seq` is added.
+
+        Raises:
+          Exception: Unexpected send errors are logged and re-raised.
+            Connection drops are logged and swallowed.
+        """
+        if not self.websocket or self.websocket.state != protocol.State.OPEN:
+            logger.debug(
+                "Attempted to send message on non-open WebSocket",
+                extra=self._log_extra(
+                    "genesys_send_error", {"payload": redaction.redact(message)}
+                ),
+            )
             return
         try:
-            message['seq'] = self.get_next_server_sequence_number()
-            logger.debug("Sending message to Genesys", extra=self._get_log_extra(log_type="genesys_send", data={"payload": redact(message)}))
+            message["seq"] = self.get_next_server_sequence_number()
+            logger.debug(
+                "Sending message to Genesys",
+                extra=self._log_extra(
+                    "genesys_send", {"payload": redaction.redact(message)}
+                ),
+            )
             await self.websocket.send(json.dumps(message))
-        except (RuntimeError, websockets.exceptions.ConnectionClosed, WebSocketDisconnect) as e:
-            logger.warning(f"Connection dropped during send to Genesys (client disconnected abruptly): {e}", extra=self._get_log_extra(log_type="genesys_send_dropped"))
-        except Exception as e:
-            logger.error("Error sending message to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_send_error", data={"payload": redact(message)}))
+        except (
+            RuntimeError,
+            websockets.exceptions.ConnectionClosed,
+            starlette_websockets.WebSocketDisconnect,
+        ) as err:
+            logger.warning(
+                "Connection dropped during send to Genesys (client"
+                " disconnected abruptly): %s",
+                err,
+                extra=self._log_extra("genesys_send_dropped"),
+            )
+        except Exception:
+            logger.error(
+                "Error sending message to Genesys",
+                exc_info=True,
+                extra=self._log_extra(
+                    "genesys_send_error", {"payload": redaction.redact(message)}
+                ),
+            )
             raise
 
-    async def send_error_report(self, errorType, errorMessage, source=None, details=None):
-        error_payload = {
-            "type": "errorReport",
-            "payload": {
-                "errorType": errorType,
-                "errorMessage": errorMessage
-            }
+    async def send_error_report(
+        self,
+        error_type: str,
+        error_message: str,
+        source: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Sends an error report to Genesys unless a disconnect is underway.
+
+        Args:
+          error_type: Short error category.
+          error_message: Human-readable description.
+          source: Where the error happened.
+          details: Extra details.
+        """
+        payload: dict[str, Any] = {
+            "errorType": error_type,
+            "errorMessage": error_message,
         }
         if source:
-            error_payload["payload"]["source"] = source
+            payload["source"] = source
         if details:
-            error_payload["payload"]["details"] = details
-
+            payload["details"] = dict(details)
+        if self.disconnect_initiated:
+            logger.debug(
+                "Suppressing error report due to disconnect in progress.",
+                extra=self._log_extra("genesys_error_report_suppress"),
+            )
+            return
         data_message = {
             "type": "data",
-            "payload": error_payload
+            "payload": {"type": "errorReport", "payload": payload},
         }
-        
-        if self.disconnect_initiated:
-            logger.debug("Suppressing error report due to disconnect in progress.", extra=self._get_log_extra(log_type="genesys_error_report_suppress"))
-            return
-            
         try:
             await self.send_message(data_message)
-            logger.info("Sent error report to Genesys", extra=self._get_log_extra(log_type="genesys_send_error_report", data={
-                "errorType": errorType,
-                "errorMessage": errorMessage,
-                "details": details
-            }))
-        except Exception as e:
-            logger.error("Failed to send error report to Genesys", exc_info=True, extra=self._get_log_extra(log_type="genesys_error_report_failed", data={
-                "errorType": errorType
-            }))
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "Failed to send error report to Genesys",
+                exc_info=True,
+                extra=self._log_extra(
+                    "genesys_error_report_failed", {"errorType": error_type}
+                ),
+            )
+            return
+        logger.info(
+            "Sent error report to Genesys",
+            extra=self._log_extra(
+                "genesys_send_error_report",
+                {
+                    "errorType": error_type,
+                    "errorMessage": error_message,
+                    "details": details,
+                },
+            ),
+        )

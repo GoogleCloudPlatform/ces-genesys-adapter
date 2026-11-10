@@ -12,18 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for FORCE_ADAPTER_SESSION_ID session-ID selection."""
+"""Tests for the session-ID policy, including FORCE_ADAPTER_SESSION_ID."""
 
+import asyncio
 import dataclasses
-import json
 import unittest
 from unittest import mock
 
-from src import ces_ws
-from src import genesys_ws
+from src import call_session
 from src import settings as settings_lib
+from src.backends import base
 
 _AGENT_ID = "projects/test-proj/locations/us/apps/app-1"
+_DEPLOYMENT_ID = f"{_AGENT_ID}/deployments/dep-1"
 
 
 def _settings(force: bool) -> settings_lib.Settings:
@@ -32,110 +33,151 @@ def _settings(force: bool) -> settings_lib.Settings:
     )
 
 
-def _open_message(input_variables: dict[str, str]) -> str:
-    return json.dumps(
-        {
-            "type": "open",
-            "seq": 1,
-            "id": "client-id",
-            "parameters": {
-                "conversationId": "genesys-conv-999",
-                "inputVariables": input_variables,
-                "media": [{"type": "audio", "format": "PCMU", "rate": 8000}],
-            },
-        }
-    )
+async def _wait_forever() -> None:
+    await asyncio.Event().wait()
 
 
-class CesWsForceAdapterSessionIdTest(unittest.IsolatedAsyncioTestCase):
+def _make_session(
+    adapter_session_id: str,
+) -> tuple[call_session.CallSession, mock.AsyncMock, mock.AsyncMock]:
+    """Returns a session with a mocked Genesys link and backend."""
+    genesys = mock.AsyncMock()
+    genesys.disconnect_initiated = False
+    genesys.audio_sink_open = mock.MagicMock(return_value=True)
+    backend = mock.AsyncMock()
+    backend.mode = "ces"
+    backend.agent_session_id = None
+    backend.is_connected = mock.MagicMock(return_value=True)
+    # Like a real transport, receive() waits until there is a message.
+    backend.receive = mock.AsyncMock(side_effect=_wait_forever)
+    session = call_session.CallSession(genesys, adapter_session_id, backend)
+    return session, genesys, backend
 
-    async def _connect(
-        self, force: bool, adapter_session_id: str, session_id: str | None
-    ) -> str:
-        ces_client = ces_ws.CESWS(
-            mock.MagicMock(), adapter_session_id=adapter_session_id
-        )
-        provider = ces_ws.auth_provider
-        with (
-            mock.patch.object(ces_ws, "settings", _settings(force)),
-            mock.patch.object(
-                provider,
-                "get_project_id",
-                new_callable=mock.AsyncMock,
-                return_value="test-proj",
-            ),
-            mock.patch.object(
-                provider,
-                "get_token",
-                new_callable=mock.AsyncMock,
-                return_value="test-token",
-            ),
-            mock.patch.object(
-                ces_ws.websockets, "connect", new_callable=mock.AsyncMock
-            ) as mock_connect,
+
+class SessionIdPolicyTest(unittest.IsolatedAsyncioTestCase):
+
+    async def _start(
+        self, force: bool, adapter_session_id: str, input_variables: dict
+    ) -> tuple[call_session.CallSession, mock.AsyncMock]:
+        session, _, backend = _make_session(adapter_session_id)
+        with mock.patch.object(
+            call_session.settings, "settings", _settings(force)
         ):
-            mock_connect.return_value = mock.AsyncMock()
-            await ces_client.connect(agent_id=_AGENT_ID, session_id=session_id)
-        return ces_client.session_id
+            started = await session.start(input_variables, "genesys-conv-999")
+        self.assertTrue(started)
+        await session.close()
+        return session, backend
 
-    async def test_default_behavior_uses_passed_session_id(self):
-        session_name = await self._connect(
-            False, "adapter-uuid-1", "genesys-conv-id-123"
+    async def test_default_prefers_conversation_id(self):
+        session, _ = await self._start(
+            False, "adapter-uuid-1", {"_agent_id": _AGENT_ID}
         )
 
-        self.assertEqual(
-            session_name, f"{_AGENT_ID}/sessions/genesys-conv-id-123"
+        self.assertEqual(session.session_id, "genesys-conv-999")
+        self.assertEqual(session.genesys_conv_id, "genesys-conv-999")
+
+    async def test_session_id_variable_overrides_conversation_id(self):
+        session, _ = await self._start(
+            False,
+            "adapter-uuid-1",
+            {"_agent_id": _AGENT_ID, "_session_id": "explicit-session-id"},
         )
 
-    async def test_default_behavior_falls_back_to_adapter_session_id(self):
-        session_name = await self._connect(False, "adapter-uuid-1", None)
+        self.assertEqual(session.session_id, "explicit-session-id")
+        # The conversation ID used in logs follows `_session_id`.
+        self.assertEqual(session.genesys_conv_id, "explicit-session-id")
 
-        self.assertEqual(session_name, f"{_AGENT_ID}/sessions/adapter-uuid-1")
-
-    async def test_force_adapter_session_id_overrides_passed_session_id(self):
-        session_name = await self._connect(
-            True, "adapter-uuid-forced", "genesys-conv-id-123"
+    async def test_force_adapter_session_id_overrides_session_id(self):
+        session, _ = await self._start(
+            True,
+            "adapter-uuid-forced",
+            {"_agent_id": _AGENT_ID, "_session_id": "explicit-session-id"},
         )
 
-        self.assertEqual(
-            session_name, f"{_AGENT_ID}/sessions/adapter-uuid-forced"
-        )
-
-
-class GenesysWsForceAdapterSessionIdTest(unittest.IsolatedAsyncioTestCase):
-
-    def _make_genesys_ws(self, adapter_session_id: str) -> genesys_ws.GenesysWS:
-        handler = genesys_ws.GenesysWS(
-            mock.AsyncMock(), adapter_session_id=adapter_session_id
-        )
-        handler.send_message = mock.AsyncMock()
-        handler.ces_ws = mock.AsyncMock()
-        handler.ces_ws.connect = mock.AsyncMock(return_value=True)
-        return handler
-
-    async def test_default_session_id_prefers_conversation_id(self):
-        handler = self._make_genesys_ws("adapter-uuid-2")
-        message = _open_message({"_agent_id": _AGENT_ID})
-
-        with mock.patch.object(genesys_ws, "settings", _settings(False)):
-            await handler.handle_text_message(message)
-
-        self.assertEqual(handler.session_id, "genesys-conv-999")
-        self.assertEqual(handler.conversation_id, "genesys-conv-999")
-
-    async def test_force_adapter_session_id_overrides_in_genesys_ws(self):
-        adapter_id = "adapter-uuid-forced-2"
-        handler = self._make_genesys_ws(adapter_id)
-        message = _open_message(
-            {"_agent_id": _AGENT_ID, "_session_id": "explicit-session-id"}
-        )
-
-        with mock.patch.object(genesys_ws, "settings", _settings(True)):
-            await handler.handle_text_message(message)
-
-        self.assertEqual(handler.session_id, adapter_id)
+        self.assertEqual(session.session_id, "adapter-uuid-forced")
         # The Genesys conversationId is kept for external correlation.
-        self.assertEqual(handler.conversation_id, "genesys-conv-999")
+        self.assertEqual(session.genesys_conv_id, "genesys-conv-999")
+
+    async def test_backend_receives_resolved_start(self):
+        _, backend = await self._start(
+            False,
+            "adapter-uuid-1",
+            {"_deployment_id": _DEPLOYMENT_ID, "region": "west"},
+        )
+
+        start = backend.open.call_args.args[0]
+        self.assertEqual(
+            start,
+            base.SessionStart(
+                agent_id=_AGENT_ID,
+                deployment_id=_DEPLOYMENT_ID,
+                session_id="genesys-conv-999",
+                variables={
+                    "region": "west",
+                    "adapterSessionId": "adapter-uuid-1",
+                },
+                initial_message=None,
+            ),
+        )
+
+
+class StartValidationTest(unittest.IsolatedAsyncioTestCase):
+
+    async def test_invalid_deployment_id_disconnects(self):
+        session, genesys, backend = _make_session("adapter-uuid-1")
+
+        started = await session.start(
+            {"_deployment_id": "projects/p/apps/a"}, "conv"
+        )
+
+        self.assertFalse(started)
+        genesys.send_disconnect.assert_awaited_once_with(
+            "error", "Invalid _deployment_id format"
+        )
+        backend.open.assert_not_awaited()
+
+    async def test_missing_agent_disconnects(self):
+        session, genesys, _ = _make_session("adapter-uuid-1")
+
+        started = await session.start({"foo": "bar"}, "conv")
+
+        self.assertFalse(started)
+        genesys.send_disconnect.assert_awaited_once_with(
+            "error", "Missing required parameter: _agent_id or _deployment_id"
+        )
+
+    async def test_initial_message_json_is_decoded(self):
+        session, _, _ = _make_session("adapter-uuid-1")
+
+        await session.start(
+            {"_agent_id": _AGENT_ID, "_initial_message": '"hello"'}, "conv"
+        )
+        await session.close()
+
+        self.assertEqual(session.initial_message, "hello")
+
+    async def test_initial_message_falls_back_to_raw_text(self):
+        session, _, _ = _make_session("adapter-uuid-1")
+
+        await session.start(
+            {"_agent_id": _AGENT_ID, "_initial_message": "hello there"}, "conv"
+        )
+        await session.close()
+
+        self.assertEqual(session.initial_message, "hello there")
+
+
+class AgentIdFromDeploymentTest(unittest.TestCase):
+
+    def test_valid_deployment(self):
+        self.assertEqual(
+            call_session.agent_id_from_deployment(_DEPLOYMENT_ID), _AGENT_ID
+        )
+
+    def test_malformed_deployment(self):
+        self.assertIsNone(
+            call_session.agent_id_from_deployment(f"{_AGENT_ID}/versions/v1")
+        )
 
 
 if __name__ == "__main__":
